@@ -1,0 +1,19 @@
+#!/bin/sh
+
+# Set CPU frequency governor for all cores (e.g., "performance", "powersave")
+
+MODE="performance"
+
+# Get number of CPU cores (zero-based indexing)
+NUM_CORES=$(nproc)
+NUM_CORES=$(expr $NUM_CORES - 1)
+
+# Ask for sudo password once up front
+sudo -v
+
+for i in $(seq 0 $NUM_CORES); do
+    # Set governor for each CPU core
+    echo "$MODE" | sudo tee /sys/devices/system/cpu/cpu$i/cpufreq/scaling_governor > /dev/null
+done
+
+echo "All CPU cores set to '$MODE' governor."

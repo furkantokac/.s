@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+
+# This script appends function definitions to ~/.bashrc for each executable script in the current directory.
+# Each function will be named as "s_scriptname" and will call the corresponding script in this directory.
+# The functions are immediately sourced into the current session as well.
+
+BASHRC="$HOME/.bashrc"
+CWD="$(pwd)"
+
+START_MARK="# === s_ script function import - START ==="
+END_MARK="# === s_ script function import - END ==="
+
+# Remove old block (if exists)
+sed -i "/$START_MARK/,/$END_MARK/d" "$BASHRC"
+
+{
+    echo ""
+    echo "$START_MARK"
+    echo "# Functions to call scripts from $CWD using s_<scriptname> format"
+    for f in "$CWD"/*; do
+        [ -x "$f" ] || continue
+        name=$(basename "$f")
+        echo "s_$name() { \"$f\" \"\$@\"; }"
+    done
+    echo "$END_MARK"
+} >> "$BASHRC"
+
+echo "Function block for scripts in $CWD has been added to ~/.bashrc."
+
+# Immediately define functions for the current session
+for f in "$CWD"/*; do
+    [ -x "$f" ] || continue
+    name=$(basename "$f")
+    eval "s_$name() { \"$f\" \"\$@\"; }"
+done
+
+echo "Functions (with 's_' prefix) are available in the current session."

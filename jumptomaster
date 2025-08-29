@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+
+# jumptomaster: Safely reset the local "master" branch to "origin/master" in the current repository,
+# while backing up the old "master" branch as "_bak_master".
+# - Temporary branch "tmpi" is used for safe checkout
+# - Existing "master" is backed up before deletion
+# - All steps are forced; use with care!
+
+set -e
+
+# Fetch the latest updates from origin
+git fetch origin
+
+# Create a temporary branch from current HEAD to avoid checkout issues
+git branch -D tmpi 2>/dev/null || true
+git branch tmpi
+git checkout tmpi -f
+
+# Backup the existing local master as _bak_master (if it exists)
+if git show-ref --verify --quiet refs/heads/master; then
+    # Delete previous backup if exists
+    git branch -D _bak_master 2>/dev/null || true
+    git branch _bak_master master
+    echo "Backed up old 'master' as '_bak_master'."
+fi
+
+# Delete local master if exists
+git branch -D master 2>/dev/null || true
+
+# Check out a new local master from origin/master
+git checkout origin/master -b master
+
+# Delete the temporary branch
+git branch -D tmpi
+
+echo "Local 'master' branch is now reset to 'origin/master'."

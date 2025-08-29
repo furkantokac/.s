@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+
+# watch_cmd: Watch the last N lines of a command's output, refreshing every T seconds.
+# Usage: watch_cmd "your_command" N [interval]
+#   your_command : Command to run (in quotes)
+#   N            : Number of last lines to display
+#   interval     : Refresh interval in seconds (default: 0.1)
+
+CMD="$1"
+LINES="$2"
+INTERVAL="${3:-0.1}"
+
+if [ -z "$CMD" ] || [ -z "$LINES" ]; then
+    echo "Usage: $0 \"command\" N [interval]"
+    exit 1
+fi
+
+while true; do
+    clear
+    echo "[watch_cmd] Running: $CMD"
+    echo "[watch_cmd] Showing last $LINES lines (interval: $INTERVAL s)"
+    echo "---------------------------------------------"
+    eval "$CMD" | tail -n "$LINES"
+    sleep "$INTERVAL"
+done

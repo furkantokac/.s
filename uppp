@@ -1,0 +1,18 @@
+#!/bin/sh
+
+# For KDE Neon
+
+echo "### ### ### -> apt update"
+sudo apt update
+
+echo "### ### ### -> apt list --upgradable"
+sudo apt list --upgradable
+
+echo "### ### ### -> pkcon update"
+sudo pkcon update -y -v
+
+echo "### ### ### -> apt autoremove"
+sudo apt autoremove -y
+
+echo "### ### ### -> apt autoclean"
+sudo apt autoclean -y

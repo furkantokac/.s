@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Usage: ./.canup [index]
+# Example: ./.canup 0   -> creates can0 as VCAN and brings it up
+# Defaults: index=0
+
+set -euo pipefail
+
+IDX="${1:-0}"
+IFACE="can${IDX}"
+
+# If iface exists, warn and exit (do not modify)
+if ip link show "${IFACE}" >/dev/null 2>&1; then
+  echo "Error: ${IFACE} already exists. Use ./.canrm ${IDX} if you want to remove it."
+  exit 1
+fi
+
+sudo modprobe vcan
+
+sudo ip link add dev "${IFACE}" type vcan
+sudo ip link set up "${IFACE}"
+
+echo "\"${IFACE}\" (vcan) is up now."

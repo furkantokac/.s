@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Usage: ./.canslup [index] [kbps] [tty]
+# Example: ./.canslup 0 500 /dev/ttyACM0
+# Defaults: index=0, kbps=500, tty=/dev/ttyACM0
+
+set -euo pipefail
+
+IDX="${1:-0}"
+RATE_KBPS="${2:-500}"
+TTY="${3:-/dev/ttyACM0}"
+IFACE="can${IDX}"
+
+# bitrate mapping for slcand -sX (CiA standard set)
+case "${RATE_KBPS}" in
+  10)   S_OPT="0" ;; 20)  S_OPT="1" ;; 50)  S_OPT="2" ;;
+  100)  S_OPT="3" ;; 125) S_OPT="4" ;; 250) S_OPT="5" ;;
+  500)  S_OPT="6" ;; 800) S_OPT="7" ;; 1000) S_OPT="8" ;;
+  *) echo "Unsupported bitrate ${RATE_KBPS} kbps. Use: 10 20 50 100 125 250 500 800 1000." ; exit 1 ;;
+esac
+
+# If iface exists, warn and exit (user handles cleanup with .canrm)
+if ip link show "${IFACE}" >/dev/null 2>&1; then
+  echo "Error: ${IFACE} already exists. Use ./.canrm ${IDX} if you want to remove it."
+  exit 1
+fi
+
+# If an slcand already running on this TTY, stop it (to avoid duplicate daemons)
+if pgrep -f "slcand.*${TTY}" >/dev/null; then
+  echo "Killing existing slcand on ${TTY}..."
+  sudo pkill -f "slcand.*${TTY}" || true
+fi
+
+echo "Attaching ${TTY} -> ${IFACE} @ ${RATE_KBPS} kbps ..."
+sudo slcand -o -c -s${S_OPT} "${TTY}" "${IFACE}"
+
+sudo ip link set up "${IFACE}"
+
+echo "\"${IFACE}\" is up now with ${RATE_KBPS} kbps via ${TTY}."

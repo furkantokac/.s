@@ -1,0 +1,15 @@
+#!/bin/sh
+
+# Set all CPU cores to 'powersave' governor
+
+MODE="powersave"
+NUM_CORES=$(nproc)
+NUM_CORES=$(expr $NUM_CORES - 1)
+
+sudo -v  # Ask for sudo password up front
+
+for i in $(seq 0 $NUM_CORES); do
+    echo "$MODE" | sudo tee /sys/devices/system/cpu/cpu$i/cpufreq/scaling_governor > /dev/null
+done
+
+echo "All CPU cores set to '$MODE' governor."

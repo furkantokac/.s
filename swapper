@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Run as root!"
+    exit 1
+fi
+
+# Settings
+swapOnAfter=5000    # MB
+swapOffBefore=4000  # MB
+
+check_interval=2    # seconds
+
+# Swap status control (returns 1=on, 0=off)
+is_swap_on() {
+    swapon --show | grep -q '^/'; return $?
+}
+
+fun_swapon() {
+    if ! is_swap_on; then
+        swapon -a
+        logger "[swapguard] Swap ON at $(date)."
+        echo "Swap ON"
+    fi
+}
+
+fun_swapoff() {
+    if is_swap_on; then
+        swapoff -a
+        logger "[swapguard] Swap OFF at $(date)."
+        echo "Swap OFF"
+    fi
+}
+
+while true; do
+    usedRam=$(free -m | awk '/^Mem:/ { print $3 }')
+
+    if [ "$usedRam" -gt "$swapOnAfter" ]; then
+        fun_swapon
+    fi
+
+    if [ "$usedRam" -lt "$swapOffBefore" ]; then
+        fun_swapoff
+    fi
+
+    sleep "$check_interval"
+done

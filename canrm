@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Usage: ./.canrm [index]
+# Example: ./.canrm 0  -> removes can0 (vcan/can/slcan)
+
+set -euo pipefail
+
+IDX="${1:-0}"
+IFACE="can${IDX}"
+
+if ! ip link show "${IFACE}" >/dev/null 2>&1; then
+  echo "\"${IFACE}\" does not exist."
+  exit 0
+fi
+
+if pgrep -fa slcand | grep -q " ${IFACE}\b"; then
+  echo "Stopping slcand for ${IFACE}..."
+  sudo pkill -f "slcand.* ${IFACE}\b" || true
+fi
+
+echo "Removing ${IFACE}..."
+sudo ip link set down "${IFACE}" || true
+sudo ip link delete "${IFACE}" || true
+
+sudo ip link delete "${IFACE}" type can  >/dev/null 2>&1 || true
+sudo ip link delete "${IFACE}" type vcan >/dev/null 2>&1 || true
+
+echo "\"${IFACE}\" has been removed."
