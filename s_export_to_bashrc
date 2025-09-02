@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+
+# This script adds the current script's directory to ~/.bashrc's PATH (if not already present),
+# and immediately updates PATH for the current session.
+
+BASHRC="$HOME/.bashrc"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LINE="export PATH=\"$SCRIPT_DIR:\$PATH\""
+
+# Check if the export line already exists in ~/.bashrc
+if grep -Fxq "$LINE" "$BASHRC"; then
+    echo "The export line for this directory is already present in ~/.bashrc."
+else
+    echo "" >> "$BASHRC"
+    echo "# Add $SCRIPT_DIR directory to PATH so scripts inside can be called by their filenames" >> "$BASHRC"
+    echo "$LINE" >> "$BASHRC"
+    echo "The export line for $SCRIPT_DIR has been added to ~/.bashrc."
+fi
+
+# Immediately update PATH for the current session
+export PATH="$SCRIPT_DIR:$PATH"
+echo "PATH updated for the current session as well."

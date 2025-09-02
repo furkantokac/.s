@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+
+# myscript: Run a given command repeatedly with watch, displaying only the last N lines.
+# Usage: myscript "your_command" N [interval]
+#   your_command : The command to run (in quotes)
+#   N            : Number of last lines to display
+#   interval     : Refresh interval in seconds (default: 0.1)
+
+CMD="$1"
+LINES="$2"
+INTERVAL="${3:-0.1}"
+
+if [ -z "$CMD" ] || [ -z "$LINES" ]; then
+    echo "Usage: $0 \"your_command\" N [interval]"
+    exit 1
+fi
+
+# Run the command with watch, piping output to tail
+watch -n "$INTERVAL" "$CMD | tail -n $LINES"
