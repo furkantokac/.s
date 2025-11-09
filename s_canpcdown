@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# s_canpcdown: Brings down a PEAK-USB (pcan) interface
+#
+# Usage: ./s_canpcdown [index]
+# Example: ./s_canpcdown 0  -> brings down can0
+#
+# This script only takes the interface DOWN. It does not DELETE it,
+# as the 'peak_usb' kernel driver manages the device's existence.
+
+set -euo pipefail
+
+IDX="${1:-0}"
+IFACE="can${IDX}"
+
+# Check if the interface exists
+if ! ip link show "${IFACE}" >/dev/null 2>&1; then
+  echo "Interface \"${IFACE}\" does not exist. Nothing to do."
+  exit 0
+fi
+
+# Check if it's already down
+# We check for the "UP" state, and if it's not there, we assume it's down.
+if ! ip link show "${IFACE}" | grep -q " state UP "; then
+    echo "Interface \"${IFACE}\" is already down."
+    exit 0
+fi
+
+echo "Taking interface \"${IFACE}\" down..."
+sudo ip link set down "${IFACE}"
+
+echo "Interface \"${IFACE}\" is now down."

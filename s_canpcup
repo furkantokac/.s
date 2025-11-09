@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# s_canpcup: Script to bring up a PEAK-USB (pcan) interface
+#
+# Usage: ./s_canpcup [kbps] [index]
+# Example: ./s_canpcup 500 0   (Configures can0 for 500kbps)
+# Example: ./s_canpcup 125 1   (Configures can1 for 125kbps)
+#
+# Defaults: kbps=500, index=0 (can0)
+
+set -e
+
+# --- 1. Get parameters ---
+# User request: 1st param is bitrate (kbps), 2nd param is index
+RATE_KBPS="${1:-500}"
+IDX="${2:-0}"
+IFACE="can${IDX}"
+
+# Convert kbps to bps (ip link command needs it in bps)
+RATE_BPS=$((RATE_KBPS * 1000))
+
+# --- 2. Feedback ---
+echo "Configuring PEAK-USB (PCAN) interface:"
+echo "  Interface (IFACE): $IFACE"
+echo "  Speed (RATE):      $RATE_KBPS kbps (${RATE_BPS} bps)"
+echo "---"
+
+# --- 3. Check kernel module ---
+# If peak_usb module is not loaded, try to load it with sudo
+if ! lsmod | grep -q "^peak_usb"; then
+    echo "Loading 'peak_usb' kernel module..."
+    sudo modprobe peak_usb
+    sleep 0.5 # Short wait for the module to create the device
+fi
+
+# --- 4. Check if interface exists ---
+# Even if module is loaded, no interface means adapter is not plugged in
+if ! ip link show "${IFACE}" >/dev/null 2>&1; then
+    echo "Error: Interface ${IFACE} not found."
+    echo "Is your PCAN adapter plugged in?"
+    echo "Available interfaces:"
+    ip link show
+    exit 1
+fi
+
+# --- 5. Configure interface (take DOWN, set, bring UP) ---
+# To change settings (like bitrate), it's safest to
+# first bring the interface 'down'.
+echo "Taking ${IFACE} down for configuration..."
+sudo ip link set "${IFACE}" down
+
+echo "Setting bitrate (${RATE_BPS} bps) and type ('can')..."
+sudo ip link set "${IFACE}" type can bitrate "${RATE_BPS}"
+
+echo "Bringing ${IFACE} up..."
+sudo ip link set "${IFACE}" up
+
+echo "---"
+echo "Success: ${IFACE} is now active at ${RATE_KBPS} kbps."
+echo ""
+
+# Show the final detailed status of the interface
+ip -d link show "${IFACE}"
