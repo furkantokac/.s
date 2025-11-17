@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+
+# Check if commit message is provided
+if [ -z "$1" ]; then
+    echo "Error: You must provide a commit message!"
+    echo "Usage: $0 \"your commit message\""
+    exit 1
+fi
+
+COMMIT_MESSAGE="$1"
+
+# Iterate through all directories in current directory
+for dir in */; do
+    # Clean directory name (remove trailing /)
+    dir_name="${dir%/}"
+    
+    # Check if .git directory exists
+    if [ -d "$dir_name/.git" ]; then
+        echo "================================"
+        echo "Git repository found: $dir_name"
+        echo "================================"
+        
+        # Enter directory
+        cd "$dir_name" || continue
+        
+        # Perform git operations
+        echo ">>> Running git add ..."
+        git add .
+        
+        echo ">>> Running git commit ..."
+        git commit -m "$COMMIT_MESSAGE"
+        
+        echo ">>> Running git push ..."
+        git push --set-upstream origin master
+        
+        # Return to parent directory
+        cd ..
+        
+        echo "✓ Operations completed for $dir_name"
+        echo ""
+    else
+        echo "⊘ $dir_name - Not a git repository, skipping..."
+    fi
+done
+
+echo "================================"
+echo "All operations completed!"
+echo "================================"

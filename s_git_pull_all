@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+
+echo "================================"
+echo "Git Pull All Repositories"
+echo "================================"
+echo ""
+
+# Counter for statistics
+total_repos=0
+successful_pulls=0
+failed_pulls=0
+skipped_repos=0
+
+# Iterate through all directories in current directory
+for dir in */; do
+    # Clean directory name (remove trailing /)
+    dir_name="${dir%/}"
+    
+    # Check if .git directory exists
+    if [ -d "$dir_name/.git" ]; then
+        echo "================================"
+        echo "Git repository found: $dir_name"
+        echo "================================"
+        
+        ((total_repos++))
+        
+        # Enter directory
+        cd "$dir_name" || continue
+        
+        # Check for uncommitted changes
+        if ! git diff-index --quiet HEAD --; then
+            echo "⚠️  Warning: Uncommitted changes detected!"
+            echo "   Stashing changes before pull..."
+            git stash save "Auto-stash by s_git_pull_all on $(date '+%Y-%m-%d %H:%M:%S')"
+        fi
+        
+        # Fetch latest changes
+        echo ">>> Running git fetch origin ..."
+        if git fetch origin; then
+            echo "✓ Fetch successful"
+        else
+            echo "✗ Fetch failed"
+            cd ..
+            ((failed_pulls++))
+            continue
+        fi
+        
+        # Check current branch
+        current_branch=$(git rev-parse --abbrev-ref HEAD)
+        echo "Current branch: $current_branch"
+        
+        # Pull from master
+        echo ">>> Running git pull origin master ..."
+        if git pull origin master; then
+            echo "✓ Pull successful for $dir_name"
+            ((successful_pulls++))
+            
+            # If there were stashed changes, inform user
+            if git stash list | grep -q "Auto-stash by s_git_pull_all"; then
+                echo "💡 Tip: You have stashed changes. Use 'git stash pop' to restore them."
+            fi
+        else
+            echo "✗ Pull failed for $dir_name"
+            ((failed_pulls++))
+        fi
+        
+        # Return to parent directory
+        cd ..
+        
+        echo ""
+    else
+        echo "⊘ $dir_name - Not a git repository, skipping..."
+        ((skipped_repos++))
+    fi
+done
+
+echo "================================"
+echo "Summary"
+echo "================================"
+echo "Total repositories found: $total_repos"
+echo "Successful pulls: $successful_pulls"
+echo "Failed pulls: $failed_pulls"
+echo "Skipped (not git repos): $skipped_repos"
+echo "================================"
+echo "All operations completed!"
+echo "================================"
