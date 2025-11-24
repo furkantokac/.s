@@ -1,0 +1,113 @@
+#!/bin/bash
+
+show_help() {
+    echo "Usage:"
+    echo "  s_mv host /remote/path to /local/path       (left to right)"
+    echo "  s_mv /local/path to host /remote/path       (left to right)"
+    echo "  s_mv host /remote/path toleft /local/path  (right to left)"
+    echo ""
+    echo "Options:"
+    echo "  -h    Show this help message"
+}
+
+if [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
+    show_help
+    exit 0
+fi
+
+if [ $# -lt 4 ]; then
+    echo "Error: Missing parameters."
+    show_help
+    exit 1
+fi
+
+SOURCE=""
+DEST=""
+
+# Check which argument is the direction keyword
+DIRECTION=""
+REVERSE=false
+
+if [[ "$2" == "to" ]]; then
+    DIRECTION="2"
+    REVERSE=false
+elif [[ "$2" == "toleft" ]]; then
+    DIRECTION="2"
+    REVERSE=true
+elif [[ "$3" == "to" ]]; then
+    DIRECTION="3"
+    REVERSE=false
+elif [[ "$3" == "toleft" ]]; then
+    DIRECTION="3"
+    REVERSE=true
+else
+    echo "Error: 'to' or 'toleft' keyword not found."
+    exit 1
+fi
+
+# Parse based on direction position and @ character
+if [[ "$DIRECTION" == "2" ]]; then
+    # Format: arg1 to/toleft arg3 arg4
+    if [[ "$1" == *@* ]]; then
+        # Remote to local: host to/toleft /local/path
+        REMOTE="$1:$2"
+        LOCAL="$4"
+        
+        if [[ "$LOCAL" == "." ]]; then
+            LOCAL="$PWD"
+        fi
+        
+        if [[ "$REVERSE" == true ]]; then
+            SOURCE="$LOCAL"
+            DEST="$REMOTE"
+        else
+            SOURCE="$REMOTE"
+            DEST="$LOCAL"
+        fi
+    else
+        # Local to remote: /local to/toleft host /remote
+        LOCAL="$1"
+        REMOTE="$3:$4"
+        
+        if [[ "$REVERSE" == true ]]; then
+            SOURCE="$REMOTE"
+            DEST="$LOCAL"
+        else
+            SOURCE="$LOCAL"
+            DEST="$REMOTE"
+        fi
+    fi
+elif [[ "$DIRECTION" == "3" ]]; then
+    # Format: arg1 arg2 to/toleft arg4
+    if [[ "$1" == *@* ]]; then
+        # Remote to local: host /remote to/toleft /local
+        REMOTE="$1:$2"
+        LOCAL="$4"
+        
+        if [[ "$LOCAL" == "." ]]; then
+            LOCAL="$PWD"
+        fi
+        
+        if [[ "$REVERSE" == true ]]; then
+            SOURCE="$LOCAL"
+            DEST="$REMOTE"
+        else
+            SOURCE="$REMOTE"
+            DEST="$LOCAL"
+        fi
+    else
+        # Local to remote: /local to/toleft host /remote
+        LOCAL="$1"
+        REMOTE="$3:$4"
+        
+        if [[ "$REVERSE" == true ]]; then
+            SOURCE="$REMOTE"
+            DEST="$LOCAL"
+        else
+            SOURCE="$LOCAL"
+            DEST="$REMOTE"
+        fi
+    fi
+fi
+
+exec rsync -avzP "$SOURCE" "$DEST"

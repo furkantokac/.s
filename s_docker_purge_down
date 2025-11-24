@@ -5,4 +5,5 @@ if [ -n "$1" ]; then
     PROFILE="--profile $1"
 fi
 
-docker compose $PROFILE down
+docker compose $PROFILE down -v
+

@@ -1,0 +1,9 @@
+#!/bin/sh
+
+PROFILE="--profile $1"
+SERVICE="$2"
+
+docker compose $PROFILE rm -f -v $SERVICE
+docker compose $PROFILE up --build -d $SERVICE
+docker compose $PROFILE logs -f $SERVICE
+

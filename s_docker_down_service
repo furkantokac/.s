@@ -1,0 +1,7 @@
+#!/bin/sh
+
+PROFILE="--profile $1"
+SERVICE="$2"
+
+docker compose $PROFILE stop $SERVICE
+
