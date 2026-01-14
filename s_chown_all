@@ -1,0 +1,6 @@
+#!/bin/bash
+if [ -z "$1" ]; then
+    echo "Usage: s_chown_all USERNAME"
+    exit 1
+fi
+chown -R "$1" .
