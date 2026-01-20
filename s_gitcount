@@ -1,0 +1,64 @@
+#!/bin/bash
+
+# 1. Check if the current directory is a Git repository
+if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+    echo "Error: Not a Git repository."
+    exit 1
+fi
+
+# 2. Function to print formatted output with date
+# Format: [Count], [Date]: [BranchName]
+print_git_info() {
+    local ref_name=$1      # The actual reference (e.g., refs/heads/main or origin/main)
+    local display_name=$2  # How we want to print it (e.g., main)
+
+    # Check if the reference exists
+    if ! git rev-parse --verify "$ref_name" >/dev/null 2>&1; then
+        # Branch/Remote not found formatting:
+        # Aligned exactly like the success message with 0 count and 00.00.00 date
+        printf "%6s, %s: %s not found.\n" "0" "00.00.00" "$display_name"
+        return
+    fi
+
+    # Get commit count
+    local count=$(git rev-list --count "$ref_name" 2>/dev/null || echo "0")
+    
+    # Get last commit date in YY.MM.DD format (YIL.AY.GUN)
+    local last_date=$(git log -1 --format='%cd' --date=format:'%y.%m.%d' "$ref_name" 2>/dev/null)
+
+    # Print using printf
+    printf "%6s, %s: %s\n" "$count" "$last_date" "$display_name"
+}
+
+# 3. Argument Parsing Logic
+MODE=$1
+REMOTE_NAME=$2
+
+if [ "$MODE" == "all" ]; then
+    # --- MODE: ALL LOCAL BRANCHES ---
+    git for-each-ref --format='%(refname:short)' refs/heads/ | while read branch; do
+        print_git_info "$branch" "$branch"
+    done
+
+elif [ "$MODE" == "r" ]; then
+    # --- MODE: REMOTE COMPARISON ---
+    # Default to 'origin' if no remote name is provided
+    target_remote=${REMOTE_NAME:-origin}
+    
+    # Silent fetch (suppress errors if remote doesn't exist)
+    git fetch "$target_remote" --quiet >/dev/null 2>&1
+
+    # Get current branch name
+    current_branch=$(git rev-parse --abbrev-ref HEAD)
+    remote_ref="$target_remote/$current_branch"
+
+    # Print Local info
+    print_git_info "$current_branch" "$current_branch"
+    # Print Remote info
+    print_git_info "$remote_ref" "$remote_ref"
+
+else
+    # --- MODE: CURRENT BRANCH ONLY (Default) ---
+    current_branch=$(git rev-parse --abbrev-ref HEAD)
+    print_git_info "$current_branch" "$current_branch"
+fi
