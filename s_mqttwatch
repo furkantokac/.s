@@ -1,0 +1,46 @@
+#!/bin/bash
+
+# Assignment of arguments to variables
+HOST=$1
+PORT=$2
+USER=$3
+PASS=$4
+TOPIC=$5
+FLAG=$6
+
+# Basic usage check
+if [ -z "$HOST" ] || [ -z "$TOPIC" ]; then
+    echo "Usage: ./s_mqttwatch.sh <host> <port> <user> <pass> <topic> [-f]"
+    echo "Note: Use \"\" for user/pass if you want to skip authentication."
+    exit 1
+fi
+
+# Build authentication options dynamically
+# Only add -u and -P flags if the arguments are not empty
+AUTH_OPTS=""
+if [ -n "$USER" ] && [ "$USER" != "-" ]; then
+    AUTH_OPTS="-u $USER"
+fi
+
+if [ -n "$PASS" ] && [ "$PASS" != "-" ]; then
+    AUTH_OPTS="$AUTH_OPTS -P $PASS"
+fi
+
+# Generate log filename with current timestamp
+LOG_FILE="mqtt_$(date +%Y%m%d_%H%M%S).log"
+
+echo "--- MQTT Watcher Started ---"
+echo "Target: $HOST:$PORT | Topic: $TOPIC"
+
+# Final command assembly
+# $AUTH_OPTS will be empty if no user/pass provided
+MQTT_CMD="mosquitto_sub -h $HOST -p $PORT $AUTH_OPTS -t $TOPIC -v"
+
+if [ "$FLAG" == "-f" ]; then
+    echo "Logging enabled: Writing to $LOG_FILE"
+    eval $MQTT_CMD | tee -a "$LOG_FILE"
+else
+    echo "Logging disabled: Streaming to terminal only."
+    eval $MQTT_CMD
+fi
+
