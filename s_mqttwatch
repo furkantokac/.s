@@ -34,7 +34,7 @@ echo "Target: $HOST:$PORT | Topic: $TOPIC"
 
 # Final command assembly
 # $AUTH_OPTS will be empty if no user/pass provided
-MQTT_CMD="mosquitto_sub -h $HOST -p $PORT $AUTH_OPTS -t $TOPIC -v"
+MQTT_CMD='mosquitto_sub -h $HOST -p $PORT $AUTH_OPTS -t $TOPIC -v'
 
 if [ "$FLAG" == "-f" ]; then
     echo "Logging enabled: Writing to $LOG_FILE"

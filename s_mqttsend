@@ -1,0 +1,36 @@
+#!/bin/bash
+
+# ANSI Color Codes
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
+RESET='\033[0m'
+
+# Arguments
+HOST=$1
+PORT=$2
+USER=$3
+PASS=$4
+TOPIC=$5
+MESSAGE=$6
+
+# Basic usage check
+if [ -z "$HOST" ] || [ -z "$TOPIC" ] || [ -z "$MESSAGE" ]; then
+    echo -e "${YELLOW}Usage:${RESET} s_mqttsend <host> <port> <user> <pass> <topic> <message>"
+    exit 1
+fi
+
+# Authentication Logic
+AUTH_OPTS=""
+[ -n "$USER" ] && [ "$USER" != "-" ] && AUTH_OPTS="-u $USER"
+[ -n "$PASS" ] && [ "$PASS" != "-" ] && AUTH_OPTS="$AUTH_OPTS -P $PASS"
+
+# Execute mosquitto_pub
+mosquitto_pub -h "$HOST" -p "$PORT" $AUTH_OPTS -t "$TOPIC" -m "$MESSAGE"
+
+# Feedback to terminal
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}[SUCCESS]${RESET} Sent to ${CYAN}$TOPIC${RESET}: $MESSAGE"
+else
+    echo -e "${YELLOW}[ERROR]${RESET} Failed to send message."
+fi
