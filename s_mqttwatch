@@ -26,8 +26,12 @@ if [ -n "$PASS" ] && [ "$PASS" != "-" ]; then
     AUTH_OPTS="$AUTH_OPTS -P $PASS"
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_s_config.sh"
+s_ensure_dir "$S_LOG_DIR"
+
 # Generate log filename with current timestamp
-LOG_FILE="mqtt_$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="$S_LOG_DIR/mqtt_$(date +%Y%m%d_%H%M%S).log"
 
 echo "--- MQTT Watcher Started ---"
 echo "Target: $HOST:$PORT | Topic: $TOPIC"

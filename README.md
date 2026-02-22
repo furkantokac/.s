@@ -15,7 +15,7 @@ Just install once and quickly access them from your terminal.
 cd ~
 git clone https://github.com/furkantokac/.s
 cd .s
-./s_export_to_bashrc
+./_s_export_to_bashrc
 ```
 
 
