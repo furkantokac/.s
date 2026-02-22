@@ -27,7 +27,7 @@ if [ -n "$PASS" ] && [ "$PASS" != "-" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/_s_config.sh"
+source "$SCRIPT_DIR/_s_config"
 s_ensure_dir "$S_LOG_DIR"
 
 # Generate log filename with current timestamp
