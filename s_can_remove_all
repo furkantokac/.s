@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ -f "$HOME/.s/_s_config" ]; then
+    # shellcheck disable=SC1090
+    source "$HOME/.s/_s_config"
+fi
+
+C_RED='\033[0;31m'
+C_GREEN='\033[0;32m'
+C_YELLOW='\033[1;33m'
+C_BLUE='\033[0;34m'
+C_NC='\033[0m'
+
+log_pass() { echo -e "${C_GREEN}✓${C_NC} $1"; }
+log_fail() { echo -e "${C_RED}✗${C_NC} $1"; }
+log_warn() { echo -e "${C_YELLOW}!${C_NC} $1"; }
+log_info() { echo -e "${C_BLUE}→${C_NC} $1"; }
+
+ASSUME_YES=false
+declare -a VCAN_IFACES=()
+declare -a CAN_IFACES=()
+
+
+usage() {
+    cat <<'EOF'
+Usage:
+  ./s_can_remove_all
+  ./s_can_remove_all --yes
+
+What it does:
+  - Deletes all virtual CAN interfaces (vcan*)
+  - Resets physical CAN interfaces as much as userspace safely can
+  - Leaves physical CAN interfaces down
+
+Notes:
+  - This is intended to clear stale CAN state before a fresh test run
+  - Some driver-specific counters cannot be force-cleared without unplug/replug
+EOF
+}
+
+
+install_missing_packages() {
+    local -a packages=()
+
+    command -v ip >/dev/null 2>&1 || packages+=("iproute2")
+    command -v modprobe >/dev/null 2>&1 || packages+=("kmod")
+
+    if [ ${#packages[@]} -eq 0 ]; then
+        return
+    fi
+
+    log_info "Installing required packages: ${packages[*]}"
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq "${packages[@]}"
+}
+
+
+ensure_can_tools() {
+    local module
+
+    install_missing_packages
+
+    for module in can can_raw can_dev slcan gs_usb vcan; do
+        sudo modprobe "$module" 2>/dev/null || true
+    done
+
+    command -v ip >/dev/null 2>&1 || {
+        log_fail "'ip' command not found after package check"
+        exit 1
+    }
+}
+
+
+append_ifaces_by_type() {
+    local link_type="$1"
+    local -n target="$2"
+    local line
+    local rest
+    local iface
+
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        rest="${line#*: }"
+        iface="${rest%%:*}"
+        iface="${iface%@*}"
+        target+=("$iface")
+    done < <(ip -o link show type "$link_type" 2>/dev/null || true)
+}
+
+
+array_contains() {
+    local needle="$1"
+    shift
+
+    local item
+    for item in "$@"; do
+        if [ "$item" = "$needle" ]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+
+discover_can_interfaces() {
+    local -a detected_can=()
+    local iface
+
+    VCAN_IFACES=()
+    CAN_IFACES=()
+
+    append_ifaces_by_type "vcan" VCAN_IFACES
+    append_ifaces_by_type "can" detected_can
+
+    for iface in "${detected_can[@]}"; do
+        if array_contains "$iface" "${VCAN_IFACES[@]}"; then
+            continue
+        fi
+        CAN_IFACES+=("$iface")
+    done
+}
+
+
+join_ifaces() {
+    if [ $# -eq 0 ]; then
+        echo "(none)"
+        return
+    fi
+
+    printf "%s" "$1"
+    shift
+
+    while [ $# -gt 0 ]; do
+        printf " %s" "$1"
+        shift
+    done
+}
+
+
+delete_vcan_interface() {
+    local iface="$1"
+
+    log_info "Deleting virtual CAN interface: $iface"
+    sudo ip link set "$iface" down 2>/dev/null || true
+
+    if sudo ip link delete dev "$iface" type vcan 2>/dev/null ||
+       sudo ip link delete dev "$iface" 2>/dev/null; then
+        log_pass "$iface removed"
+    else
+        log_warn "Could not remove $iface"
+    fi
+}
+
+
+reset_physical_can_interface() {
+    local iface="$1"
+
+    log_info "Resetting physical CAN interface: $iface"
+
+    sudo ip link set "$iface" down 2>/dev/null || true
+    sudo ip link set "$iface" type can restart-ms 0 2>/dev/null || true
+    sudo ip link set "$iface" type can loopback off 2>/dev/null || true
+    sudo ip link set "$iface" type can listen-only off 2>/dev/null || true
+    sudo ip link set "$iface" type can one-shot off 2>/dev/null || true
+    sudo ip link set "$iface" type can berr-reporting off 2>/dev/null || true
+    sudo ip link set "$iface" type can triple-sampling off 2>/dev/null || true
+    sudo ip link set "$iface" txqueuelen 10 2>/dev/null || true
+    sudo ip link set "$iface" up 2>/dev/null || true
+    sudo ip link set "$iface" down 2>/dev/null || true
+
+    log_pass "$iface reset and left down"
+}
+
+
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --yes|-y)
+                ASSUME_YES=true
+                shift
+                ;;
+            --help|-h)
+                usage
+                exit 0
+                ;;
+            *)
+                log_fail "Unknown argument: $1"
+                usage
+                exit 1
+                ;;
+        esac
+    done
+}
+
+
+confirm() {
+    local total_vcan="${#VCAN_IFACES[@]}"
+    local total_can="${#CAN_IFACES[@]}"
+    local vcan_list
+    local can_list
+
+    vcan_list="$(join_ifaces "${VCAN_IFACES[@]}")"
+    can_list="$(join_ifaces "${CAN_IFACES[@]}")"
+
+    echo "=========================================="
+    echo "  CAN Bus Remove All"
+    echo "=========================================="
+    echo
+    log_warn "This will:"
+    echo "  - Delete $total_vcan virtual CAN interface(s): $vcan_list"
+    echo "  - Reset $total_can physical CAN interface(s): $can_list"
+    echo "  - Leave physical CAN interface(s) down"
+    echo
+
+    if [ "$ASSUME_YES" = true ]; then
+        return
+    fi
+
+    read -r -p "Continue? [y/N] " reply
+    if [[ ! "$reply" =~ ^[Yy]$ ]]; then
+        log_info "Cancelled"
+        exit 0
+    fi
+}
+
+
+main() {
+    local iface
+
+    parse_args "$@"
+    ensure_can_tools
+    discover_can_interfaces
+
+    if [ ${#VCAN_IFACES[@]} -eq 0 ] && [ ${#CAN_IFACES[@]} -eq 0 ]; then
+        log_info "No CAN interfaces found"
+        exit 0
+    fi
+
+    confirm
+    echo
+
+    for iface in "${VCAN_IFACES[@]}"; do
+        delete_vcan_interface "$iface"
+    done
+
+    for iface in "${CAN_IFACES[@]}"; do
+        reset_physical_can_interface "$iface"
+    done
+
+    echo
+    log_pass "CAN cleanup complete"
+}
+
+
+main "$@"
