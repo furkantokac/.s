@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Persist battery charge limit on ASUS laptops via systemd service.
+# Uses the asus_nb_wmi kernel module's charge_control_end_threshold sysfs interface.
+#
+# Usage:
+#   s_stop_charging_at 80      # Set and persist charge limit to 80%
+#   s_stop_charging_at status  # Show current threshold and service status
+#   s_stop_charging_at remove  # Remove the systemd service (revert to default 100%)
+
+SYSFS_PATH="/sys/class/power_supply/BAT1/charge_control_end_threshold"
+SERVICE_NAME="battery-charge-threshold.service"
+SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
+
+usage() {
+    echo "Usage: s_stop_charging_at <percentage|status|remove>"
+    echo ""
+    echo "  <percentage>  Set charge limit (20-100) and persist across reboots"
+    echo "  status        Show current threshold and systemd service status"
+    echo "  remove        Remove the systemd service (reverts to 100% on next boot)"
+    echo ""
+    echo "Examples:"
+    echo "  s_stop_charging_at 80"
+    echo "  s_stop_charging_at status"
+    exit 1
+}
+
+check_sysfs() {
+    if [ ! -f "$SYSFS_PATH" ]; then
+        echo "Error: $SYSFS_PATH not found."
+        echo "This script requires kernel support for battery charge thresholds (e.g. asus_nb_wmi, thinkpad_acpi)."
+        exit 1
+    fi
+}
+
+show_status() {
+    check_sysfs
+    local current
+    current=$(cat "$SYSFS_PATH")
+    echo "Current charge limit: ${current}%"
+    echo ""
+    if [ -f "$SERVICE_PATH" ]; then
+        echo "Systemd service: installed"
+        systemctl status "$SERVICE_NAME" --no-pager 2>/dev/null || true
+    else
+        echo "Systemd service: not installed (limit will reset on reboot)"
+    fi
+}
+
+remove_service() {
+    if [ ! -f "$SERVICE_PATH" ]; then
+        echo "Service not installed, nothing to remove."
+        exit 0
+    fi
+    echo "Removing ${SERVICE_NAME}..."
+    sudo systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+    sudo systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+    sudo rm -f "$SERVICE_PATH"
+    sudo systemctl daemon-reload
+    echo "Service removed. Charge limit will revert to 100% on next boot."
+}
+
+set_threshold() {
+    local value="$1"
+
+    if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 20 ] || [ "$value" -gt 100 ]; then
+        echo "Error: Percentage must be a number between 20 and 100."
+        exit 1
+    fi
+
+    check_sysfs
+
+    echo "Setting charge limit to ${value}%..."
+
+    # Apply immediately
+    echo "$value" | sudo tee "$SYSFS_PATH" > /dev/null
+
+    # Create systemd service for persistence
+    sudo tee "$SERVICE_PATH" > /dev/null <<EOF
+[Unit]
+Description=Set battery charge limit to ${value}%
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'echo ${value} > ${SYSFS_PATH}'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable "$SERVICE_NAME"
+    sudo systemctl start "$SERVICE_NAME"
+
+    local actual
+    actual=$(cat "$SYSFS_PATH")
+    echo "Done. Charge limit set to ${actual}% (persists across reboots)."
+}
+
+# --- Main ---
+
+if [ $# -ne 1 ]; then
+    usage
+fi
+
+case "$1" in
+    status)  show_status ;;
+    remove)  remove_service ;;
+    -h|--help) usage ;;
+    *)       set_threshold "$1" ;;
+esac
