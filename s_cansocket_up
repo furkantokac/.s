@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Bring up a generic SocketCAN interface (any CAN adapter already recognized by the kernel)
+# Usage: s_cansocket_up <iface> [kbps]
+# Example: s_cansocket_up can0 500
+# Example: s_cansocket_up can1 250
+#
+# Unlike s_canp_up, this does NOT load the peak_usb module.
+# Use this for non-PEAK adapters (Canable, USBtin native, gs_usb, etc.)
+
+set -e
+
+IFACE="${1:-}"
+RATE_KBPS="${2:-500}"
+
+if [ -z "$IFACE" ]; then
+  echo "Usage: s_cansocket_up <iface> [kbps]"
+  echo "Example: s_cansocket_up can0 500"
+  exit 1
+fi
+
+RATE_BPS=$((RATE_KBPS * 1000))
+
+echo "Configuring SocketCAN interface:"
+echo "  Interface: $IFACE"
+echo "  Speed:     $RATE_KBPS kbps (${RATE_BPS} bps)"
+echo "---"
+
+if ! ip link show "${IFACE}" >/dev/null 2>&1; then
+  echo "Error: Interface ${IFACE} not found."
+  echo "Is your CAN adapter plugged in and recognized by the kernel?"
+  echo "Available CAN interfaces:"
+  ip link show type can 2>/dev/null || echo "  (none)"
+  exit 1
+fi
+
+echo "Taking ${IFACE} down for configuration..."
+sudo ip link set "${IFACE}" down
+
+echo "Setting bitrate ${RATE_BPS} bps..."
+sudo ip link set "${IFACE}" type can bitrate "${RATE_BPS}"
+
+echo "Bringing ${IFACE} up..."
+sudo ip link set "${IFACE}" up
+
+echo "---"
+echo "Success: ${IFACE} is active at ${RATE_KBPS} kbps."
+ip -d link show "${IFACE}"

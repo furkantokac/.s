@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Create and bring up a virtual CAN (vcan) interface
+# Usage: s_canv_up <iface>
+# Example: s_canv_up can0
+# Example: s_canv_up vcan0
+
+set -euo pipefail
+
+IFACE="${1:-}"
+
+if [ -z "$IFACE" ]; then
+  echo "Usage: s_canv_up <iface>"
+  echo "Example: s_canv_up can0"
+  exit 1
+fi
+
+if ip link show "${IFACE}" >/dev/null 2>&1; then
+  echo "Error: ${IFACE} already exists. Remove it first with s_canrm_all or manually."
+  exit 1
+fi
+
+sudo modprobe vcan
+
+sudo ip link add dev "${IFACE}" type vcan
+sudo ip link set up "${IFACE}"
+
+echo "\"${IFACE}\" (vcan) is up."

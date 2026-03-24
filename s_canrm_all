@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Remove ALL CAN interfaces: bring down and delete every can/vcan/slcan in the system
+# Usage: s_canrm_all
+
+set -euo pipefail
+
+echo "=== Removing all CAN interfaces ==="
+
+# Kill all slcand daemons first
+if pgrep -f slcand >/dev/null 2>&1; then
+  echo "Stopping all slcand daemons..."
+  sudo pkill -f slcand || true
+  sleep 0.3
+fi
+
+FOUND=0
+
+# Gather all CAN-type interfaces (can, vcan, slcan)
+for TYPE in can vcan; do
+  IFACES=$(ip -br link show type "$TYPE" 2>/dev/null | awk '{print $1}' || true)
+  for IFACE in $IFACES; do
+    [ -z "$IFACE" ] && continue
+    FOUND=1
+    echo "Removing ${IFACE} (${TYPE})..."
+    sudo ip link set down "${IFACE}" 2>/dev/null || true
+    sudo ip link delete "${IFACE}" 2>/dev/null || true
+  done
+done
+
+# Catch any remaining interfaces named can* or vcan* or slcan* that weren't caught above
+for IFACE in $(ip -br link show 2>/dev/null | awk '{print $1}' | grep -E '^(can|vcan|slcan)' || true); do
+  if ip link show "${IFACE}" >/dev/null 2>&1; then
+    FOUND=1
+    echo "Removing leftover ${IFACE}..."
+    sudo ip link set down "${IFACE}" 2>/dev/null || true
+    sudo ip link delete "${IFACE}" 2>/dev/null || true
+  fi
+done
+
+if [ "$FOUND" -eq 0 ]; then
+  echo "No CAN interfaces found."
+else
+  echo "---"
+  echo "All CAN interfaces removed."
+fi

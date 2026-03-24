@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Bring up a physical CAN interface (PEAK-USB / pcan)
+# Usage: s_canp_up <iface> [kbps]
+# Example: s_canp_up can0 500
+
+set -e
+
+IFACE="${1:-}"
+RATE_KBPS="${2:-500}"
+
+if [ -z "$IFACE" ]; then
+  echo "Usage: s_canp_up <iface> [kbps]"
+  echo "Example: s_canp_up can0 500"
+  exit 1
+fi
+
+RATE_BPS=$((RATE_KBPS * 1000))
+
+echo "Configuring PEAK-USB (PCAN) interface:"
+echo "  Interface: $IFACE"
+echo "  Speed:     $RATE_KBPS kbps (${RATE_BPS} bps)"
+echo "---"
+
+if ! lsmod | grep -q "^peak_usb"; then
+  echo "Loading 'peak_usb' kernel module..."
+  sudo modprobe peak_usb
+  sleep 0.5
+fi
+
+if ! ip link show "${IFACE}" >/dev/null 2>&1; then
+  echo "Error: Interface ${IFACE} not found."
+  echo "Is your PCAN adapter plugged in?"
+  echo "Available CAN interfaces:"
+  ip link show type can 2>/dev/null || echo "  (none)"
+  exit 1
+fi
+
+echo "Taking ${IFACE} down for configuration..."
+sudo ip link set "${IFACE}" down
+
+echo "Setting bitrate ${RATE_BPS} bps..."
+sudo ip link set "${IFACE}" type can bitrate "${RATE_BPS}"
+
+echo "Bringing ${IFACE} up..."
+sudo ip link set "${IFACE}" up
+
+echo "---"
+echo "Success: ${IFACE} is active at ${RATE_KBPS} kbps."
+ip -d link show "${IFACE}"

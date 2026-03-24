@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Create and bring up an SLCAN interface via serial adapter
+# Usage: s_cansl_up <iface> [kbps] [tty]
+# Example: s_cansl_up can0 500 /dev/ttyACM0
+# Example: s_cansl_up slcan0 125
+# If tty is omitted, auto-detects lowest /dev/ttyACM*
+
+set -e
+
+IFACE="${1:-}"
+RATE_KBPS="${2:-500}"
+TTY="${3:-}"
+
+if [ -z "$IFACE" ]; then
+  echo "Usage: s_cansl_up <iface> [kbps] [tty]"
+  echo "Example: s_cansl_up can0 500 /dev/ttyACM0"
+  exit 1
+fi
+
+if [ -z "$TTY" ]; then
+  ACM_LIST=($(ls /dev/ttyACM* 2>/dev/null || true))
+  if [ ${#ACM_LIST[@]} -eq 0 ]; then
+    echo "Error: No /dev/ttyACM* device found."
+    exit 2
+  fi
+  TTY=$(printf '%s\n' "${ACM_LIST[@]}" | sort -V | head -n1)
+  echo "No TTY specified, using detected device: $TTY"
+fi
+
+echo "SLCAN setup:"
+echo "  Interface: $IFACE"
+echo "  Speed:     $RATE_KBPS kbps"
+echo "  TTY:       $TTY"
+
+case "${RATE_KBPS}" in
+  10)   S_OPT="0" ;; 20)  S_OPT="1" ;; 50)  S_OPT="2" ;;
+  100)  S_OPT="3" ;; 125) S_OPT="4" ;; 250) S_OPT="5" ;;
+  500)  S_OPT="6" ;; 800) S_OPT="7" ;; 1000) S_OPT="8" ;;
+  *)
+    echo "Unsupported bitrate ${RATE_KBPS} kbps."
+    echo "Supported: 10 20 50 100 125 250 500 800 1000"
+    exit 3
+    ;;
+esac
+
+if ip link show "${IFACE}" >/dev/null 2>&1; then
+  echo "Error: ${IFACE} already exists. Remove it first."
+  exit 4
+fi
+
+if pgrep -f "slcand.*${TTY}" >/dev/null 2>&1; then
+  echo "Killing existing slcand on ${TTY}..."
+  sudo pkill -f "slcand.*${TTY}" || true
+fi
+
+echo "Attaching ${TTY} -> ${IFACE} @ ${RATE_KBPS} kbps ..."
+sudo slcand -o -c -s${S_OPT} "${TTY}" "${IFACE}"
+sudo ip link set up "${IFACE}"
+
+echo "\"${IFACE}\" (slcan) is up via ${TTY} at ${RATE_KBPS} kbps."

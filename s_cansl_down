@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Bring down and remove an SLCAN interface, kill its slcand daemon
+# Usage: s_cansl_down <iface>
+# Example: s_cansl_down can0
+
+set -euo pipefail
+
+IFACE="${1:-}"
+
+if [ -z "$IFACE" ]; then
+  echo "Usage: s_cansl_down <iface>"
+  echo "Example: s_cansl_down can0"
+  exit 1
+fi
+
+if pgrep -fa slcand | grep -q " ${IFACE}\b"; then
+  echo "Stopping slcand for ${IFACE}..."
+  sudo pkill -f "slcand.* ${IFACE}\b" || true
+fi
+
+if ! ip link show "${IFACE}" >/dev/null 2>&1; then
+  echo "\"${IFACE}\" does not exist. Nothing to do."
+  exit 0
+fi
+
+echo "Removing \"${IFACE}\" (slcan)..."
+sudo ip link set down "${IFACE}" 2>/dev/null || true
+sudo ip link delete "${IFACE}" 2>/dev/null || true
+echo "\"${IFACE}\" removed."

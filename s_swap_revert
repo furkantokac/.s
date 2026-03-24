@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# ========================================
+# s_swap_revert — Restore pre-swap state from backup
+#
+# Disables swap, restores fstab & swappiness,
+# removes swap file, cleans up backup.
+# ========================================
+
+set -euo pipefail
+source "$(dirname "$0")/_s_config"
+
+SWAP_BAK="$S_BAK_DIR/swap"
+SWAP_FILE="/swapfile"
+
+# ============ Check backup exists ============
+s_header "Swap Revert"
+
+if [ ! -f "$SWAP_BAK/state.json" ]; then
+    s_err "No backup found at $SWAP_BAK/ — nothing to revert."
+    exit 1
+fi
+
+swap_path=$(grep -oP '"swap_file"\s*:\s*"\K[^"]+' "$SWAP_BAK/state.json" 2>/dev/null || echo "$SWAP_FILE")
+
+s_info "Backup found. Will restore pre-swap state:"
+echo "  fstab backup:  $SWAP_BAK/fstab.bak"
+echo "  sysctl backup: $SWAP_BAK/sysctl_swap.bak"
+echo "  swap file:     $swap_path"
+echo ""
+
+read -rp "Proceed with revert? [y/N] " confirm
+[[ "$confirm" =~ ^[Yy]$ ]] || { s_info "Aborted."; exit 0; }
+
+# ============ Disable swap ============
+if swapon --show=NAME --noheadings | grep -q "$swap_path"; then
+    s_info "Disabling swap on $swap_path..."
+    sudo swapoff "$swap_path"
+    s_ok "Swap disabled."
+fi
+
+# ============ Restore fstab ============
+if [ -f "$SWAP_BAK/fstab.bak" ]; then
+    s_info "Restoring /etc/fstab from backup..."
+    sudo cp "$SWAP_BAK/fstab.bak" /etc/fstab
+    s_ok "/etc/fstab restored."
+fi
+
+# ============ Restore swappiness ============
+if [ -f "$SWAP_BAK/sysctl_swap.bak" ]; then
+    s_info "Restoring swappiness from backup..."
+    old_swappiness=$(cat "$SWAP_BAK/sysctl_swap.bak")
+    sudo sysctl -w "vm.swappiness=$old_swappiness" >/dev/null
+    if [ -f /etc/sysctl.d/99-swap.conf ]; then
+        sudo rm -f /etc/sysctl.d/99-swap.conf
+    fi
+    s_ok "Swappiness restored to $old_swappiness."
+fi
+
+# ============ Remove swap file ============
+if [ -f "$swap_path" ]; then
+    s_info "Removing swap file $swap_path..."
+    sudo rm -f "$swap_path"
+    s_ok "Swap file removed."
+fi
+
+# ============ Clean up backup ============
+rm -rf "$SWAP_BAK"
+s_ok "Backup cleaned up."
+
+echo ""
+s_ok "Revert complete. Current swap status:"
+free -h | grep -i swap

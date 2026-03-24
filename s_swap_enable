@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# ========================================
+# s_swap_enable — Safe swap file creation
+#
+# Analyzes system, shows plan, asks for confirmation,
+# backs up current state, creates swap.
+# Undo with: s_swap_revert
+# ========================================
+
+set -euo pipefail
+source "$(dirname "$0")/_s_config"
+
+SWAP_BAK="$S_BAK_DIR/swap"
+SWAP_FILE="/swapfile"
+SWAPPINESS=10
+
+get_current_swap_info() {
+    local total_kb
+    total_kb=$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)
+    if (( total_kb == 0 )); then
+        echo "none"
+    else
+        local total_b=$((total_kb * 1024))
+        local free_kb
+        free_kb=$(awk '/^SwapFree:/ {print $2}' /proc/meminfo)
+        local used_b=$(( (total_kb - free_kb) * 1024 ))
+        echo "active: $(s_bytes_to_human $total_b) total, $(s_bytes_to_human $used_b) used"
+    fi
+}
+
+calc_swap_size_bytes() {
+    local ram_b=$1
+    local ram_gb
+    ram_gb=$(awk "BEGIN{printf \"%.0f\", $ram_b/1073741824}")
+    local swap_gb=$ram_gb
+    (( swap_gb < 1 )) && swap_gb=1
+    (( swap_gb > 4 )) && swap_gb=4
+    echo $(( swap_gb * 1073741824 ))
+}
+
+# ============ Analysis ============
+s_header "System Analysis"
+
+ram_b=$(awk '/^MemTotal:/ {print $2 * 1024}' /proc/meminfo)
+swap_info=$(get_current_swap_info)
+swap_sources=$(tail -n +2 /proc/swaps 2>/dev/null || true)
+cpu_count=$(nproc)
+cpu_model=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)
+read -r disk_total disk_used disk_avail disk_pct <<< "$(df -h / | awk 'NR==2 {print $2, $3, $4, $5}')"
+
+echo "  CPU:        $cpu_count × $cpu_model"
+echo "  RAM:        $(s_bytes_to_human $ram_b)"
+echo "  Disk:       $disk_total total, $disk_used used, $disk_avail available ($disk_pct)"
+echo "  Swap now:   $swap_info"
+
+if [ -n "$swap_sources" ]; then
+    echo ""
+    echo "  Active swap sources:"
+    echo "$swap_sources" | while read -r line; do echo "    $line"; done
+fi
+
+# ============ Existing swap file check ============
+if [ -f "$SWAP_FILE" ]; then
+    echo ""
+    s_warn "$SWAP_FILE already exists ($(ls -lh "$SWAP_FILE" | awk '{print $5}'))."
+    if swapon --show=NAME --noheadings | grep -q "$SWAP_FILE"; then
+        s_warn "It is currently active as swap."
+        s_info "To resize, first run: s_swap_revert"
+        exit 0
+    else
+        s_warn "It exists but is NOT active. Will be replaced."
+    fi
+fi
+
+# ============ Plan ============
+swap_b=$(calc_swap_size_bytes "$ram_b")
+
+s_header "Plan"
+echo "  Swap file:       $SWAP_FILE"
+echo "  Swap size:       $(s_bytes_to_human $swap_b)"
+echo "  Swappiness:      $SWAPPINESS (low = prefer RAM, swap only under pressure)"
+echo "  Persist:         yes (added to /etc/fstab)"
+echo ""
+echo "  Backup location: $SWAP_BAK/"
+echo "    • /etc/fstab     → $SWAP_BAK/fstab.bak"
+echo "    • swappiness     → $SWAP_BAK/sysctl_swap.bak"
+echo "    • state metadata → $SWAP_BAK/state.json"
+echo ""
+echo "  To undo later:   s_swap_revert"
+
+# ============ Disk space check ============
+avail_kb=$(df --output=avail / | tail -1 | tr -d ' ')
+avail_b=$((avail_kb * 1024))
+safe_margin=$((2 * 1073741824))
+
+if (( avail_b < swap_b + safe_margin )); then
+    echo ""
+    s_err "Not enough disk space. Need $(s_bytes_to_human $swap_b) for swap + 2 GB safety margin."
+    s_err "Available: $(s_bytes_to_human $avail_b)"
+    exit 1
+fi
+s_ok "Disk space OK ($(s_bytes_to_human $avail_b) available, $(s_bytes_to_human $swap_b) needed + 2 GB margin)"
+
+# ============ Confirm ============
+echo ""
+read -rp "Create swap? [y/N] " confirm
+[[ "$confirm" =~ ^[Yy]$ ]] || { s_info "Aborted."; exit 0; }
+
+# ============ Backup ============
+s_header "Backing up current state"
+s_ensure_dir "$SWAP_BAK"
+
+sudo cp /etc/fstab "$SWAP_BAK/fstab.bak"
+s_ok "fstab backed up."
+
+current_swappiness=$(cat /proc/sys/vm/swappiness)
+echo "$current_swappiness" > "$SWAP_BAK/sysctl_swap.bak"
+s_ok "Swappiness backed up ($current_swappiness)."
+
+cat > "$SWAP_BAK/state.json" <<EOF
+{
+    "created_at": "$(date -Iseconds)",
+    "swap_file": "$SWAP_FILE",
+    "swap_size_bytes": $swap_b,
+    "swap_size_human": "$(s_bytes_to_human $swap_b)",
+    "swappiness": $SWAPPINESS,
+    "prev_swappiness": $current_swappiness,
+    "ram_bytes": $ram_b,
+    "ram_human": "$(s_bytes_to_human $ram_b)"
+}
+EOF
+s_ok "State metadata saved."
+
+# ============ Create swap ============
+s_header "Creating swap"
+
+swap_mb=$((swap_b / 1048576))
+
+s_info "Allocating ${swap_mb} MB swap file (this may take a moment)..."
+sudo dd if=/dev/zero of="$SWAP_FILE" bs=1M count="$swap_mb" status=progress 2>&1
+s_ok "Swap file allocated."
+
+s_info "Setting permissions (root-only)..."
+sudo chmod 600 "$SWAP_FILE"
+s_ok "Permissions set (600)."
+
+s_info "Formatting as swap..."
+sudo mkswap "$SWAP_FILE" >/dev/null
+s_ok "Formatted."
+
+s_info "Activating swap..."
+sudo swapon "$SWAP_FILE"
+s_ok "Swap activated."
+
+# ============ Persist ============
+if ! grep -q "$SWAP_FILE" /etc/fstab; then
+    s_info "Adding to /etc/fstab for persistence across reboots..."
+    echo "$SWAP_FILE none swap sw 0 0" | sudo tee -a /etc/fstab >/dev/null
+    s_ok "Added to fstab."
+else
+    s_ok "Already in fstab."
+fi
+
+# ============ Swappiness ============
+s_info "Setting swappiness to $SWAPPINESS (runtime + persistent)..."
+sudo sysctl -w "vm.swappiness=$SWAPPINESS" >/dev/null
+echo "vm.swappiness=$SWAPPINESS" | sudo tee /etc/sysctl.d/99-swap.conf >/dev/null
+s_ok "Swappiness set to $SWAPPINESS."
+
+# ============ Result ============
+echo ""
+s_header "Result"
+echo ""
+free -h
+echo ""
+echo "  Swap sources:"
+swapon --show
+echo ""
+s_ok "Swap is live and will persist across reboots."
+s_info "To undo: s_swap_revert"

@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Show all CAN interfaces in the system with protocol type and state
+# Usage: s_can_show_all
+
+set -euo pipefail
+
+printf "%-12s %-10s %-8s %s\n" "INTERFACE" "PROTOCOL" "STATE" "DETAILS"
+printf "%-12s %-10s %-8s %s\n" "---------" "--------" "-----" "-------"
+
+FOUND=0
+
+for TYPE in can vcan; do
+  LINES=$(ip -br link show type "$TYPE" 2>/dev/null || true)
+  [ -z "$LINES" ] && continue
+  while IFS= read -r LINE; do
+    [ -z "$LINE" ] && continue
+    FOUND=1
+    IFACE=$(echo "$LINE" | awk '{print $1}')
+    RAW_STATE=$(echo "$LINE" | awk '{print $2}')
+
+    # Determine friendly state
+    case "$RAW_STATE" in
+      UP|UNKNOWN) STATE="UP" ;;
+      DOWN|*LOWERLAYERDOWN*) STATE="DOWN" ;;
+      *) STATE="$RAW_STATE" ;;
+    esac
+
+    # Determine protocol label
+    case "$TYPE" in
+      vcan) PROTO="vcan" ;;
+      can)
+        # Check if it's driven by slcand
+        if pgrep -fa slcand 2>/dev/null | grep -q " ${IFACE}\b"; then
+          PROTO="slcan"
+        else
+          # Try to identify driver
+          DRIVER=$(readlink "/sys/class/net/${IFACE}/device/driver" 2>/dev/null | xargs basename 2>/dev/null || echo "")
+          case "$DRIVER" in
+            peak_usb*) PROTO="peak_usb" ;;
+            gs_usb*)   PROTO="gs_usb" ;;
+            "")        PROTO="can" ;;
+            *)         PROTO="$DRIVER" ;;
+          esac
+        fi
+        ;;
+    esac
+
+    # Get bitrate if available
+    BITRATE=$(ip -d link show "${IFACE}" 2>/dev/null | grep -oP 'bitrate \K[0-9]+' || echo "")
+    if [ -n "$BITRATE" ]; then
+      DETAIL="${BITRATE} bps"
+    else
+      DETAIL="-"
+    fi
+
+    printf "%-12s %-10s %-8s %s\n" "$IFACE" "$PROTO" "$STATE" "$DETAIL"
+  done <<< "$LINES"
+done
+
+# Also catch any can*/vcan*/slcan* named interfaces not caught by type filter
+for IFACE in $(ip -br link show 2>/dev/null | awk '{print $1}' | grep -E '^(can|vcan|slcan)' || true); do
+  # Skip if already printed (check by trying type can/vcan)
+  ALREADY=0
+  for TYPE in can vcan; do
+    if ip -br link show type "$TYPE" 2>/dev/null | awk '{print $1}' | grep -qx "$IFACE"; then
+      ALREADY=1
+      break
+    fi
+  done
+  [ "$ALREADY" -eq 1 ] && continue
+
+  FOUND=1
+  RAW_STATE=$(ip -br link show "${IFACE}" 2>/dev/null | awk '{print $2}')
+  case "$RAW_STATE" in
+    UP|UNKNOWN) STATE="UP" ;;
+    *) STATE="DOWN" ;;
+  esac
+  printf "%-12s %-10s %-8s %s\n" "$IFACE" "unknown" "$STATE" "-"
+done
+
+if [ "$FOUND" -eq 0 ]; then
+  echo "(no CAN interfaces found)"
+fi
