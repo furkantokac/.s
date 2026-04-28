@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# ========================================
+# s_autoclean_all — Safe housekeeping cleanup
+#
+# Cleans up unused/cached items from:
+#   • snap     (disabled revisions)
+#   • flatpak  (unused runtimes/apps)
+#   • apt      (autoremove + clean caches)
+#   • journal  (logs older than KEEP_JOURNAL_DAYS)
+#
+# Each step is skipped if its tool is not installed.
+# Nothing here removes data the user explicitly installed.
+# ========================================
+
+set -uo pipefail
+source "$(dirname "$0")/_s_config"
+
+KEEP_JOURNAL_DAYS=14
+
+disk_used_b() {
+    df --output=used -B1 / | tail -1 | tr -d ' '
+}
+
+before_b=$(disk_used_b)
+
+# ============ snap ============
+if command -v snap >/dev/null 2>&1; then
+    s_header "snap — removing disabled revisions"
+    sudo snap list --all | awk '/disabled/{print $1, $3}' | while read -r snapname revision; do
+        s_info "Removing $snapname (rev $revision)"
+        sudo snap remove "$snapname" --revision="$revision" || s_warn "Failed: $snapname rev $revision"
+    done
+    s_ok "snap done."
+else
+    s_info "snap not installed — skipped."
+fi
+
+# ============ flatpak ============
+if command -v flatpak >/dev/null 2>&1; then
+    s_header "flatpak — removing unused runtimes/apps"
+    flatpak uninstall --unused -y || s_warn "flatpak uninstall returned non-zero"
+    s_ok "flatpak done."
+else
+    s_info "flatpak not installed — skipped."
+fi
+
+# ============ apt ============
+if command -v apt-get >/dev/null 2>&1; then
+    s_header "apt — autoremove + clean caches"
+    sudo apt-get autoremove --purge -y || s_warn "apt autoremove returned non-zero"
+    sudo apt-get autoclean -y          || s_warn "apt autoclean returned non-zero"
+    sudo apt-get clean                 || s_warn "apt clean returned non-zero"
+    s_ok "apt done."
+else
+    s_info "apt-get not installed — skipped."
+fi
+
+# ============ journalctl ============
+if command -v journalctl >/dev/null 2>&1; then
+    s_header "journal — vacuuming logs older than ${KEEP_JOURNAL_DAYS} days"
+    sudo journalctl --vacuum-time="${KEEP_JOURNAL_DAYS}d" || s_warn "journalctl vacuum returned non-zero"
+    s_ok "journal done."
+else
+    s_info "journalctl not installed — skipped."
+fi
+
+# ============ Result ============
+after_b=$(disk_used_b)
+freed_b=$(( before_b - after_b ))
+
+s_header "Result"
+echo "  Disk used before: $(s_bytes_to_human "$before_b")"
+echo "  Disk used after:  $(s_bytes_to_human "$after_b")"
+if (( freed_b > 0 )); then
+    s_ok "Freed: $(s_bytes_to_human "$freed_b")"
+elif (( freed_b == 0 )); then
+    s_info "No measurable change."
+else
+    s_info "Disk usage grew by $(s_bytes_to_human $(( -freed_b ))) during run (other activity)."
+fi
