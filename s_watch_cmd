@@ -1,19 +1,49 @@
 #!/usr/bin/env bash
 
-# myscript: Run a given command repeatedly with watch, displaying only the last N lines.
-# Usage: myscript "your_command" N [interval]
+# Run a given command repeatedly with watch, showing N lines of output.
+# Usage: s_watch_cmd "your_command" [lines] [interval]
 #   your_command : The command to run (in quotes)
-#   N            : Number of last lines to display
-#   interval     : Refresh interval in seconds (default: 0.1)
+#   lines        : N lines to display (default: 50 = last 50; -50 = first 50)
+#   interval     : Refresh interval in seconds (default: 1)
 
 CMD="$1"
-LINES="$2"
-INTERVAL="${3:-0.1}"
+LINES=50
+MODE=tail
+INTERVAL=1
 
-if [ -z "$CMD" ] || [ -z "$LINES" ]; then
-    echo "Usage: $0 \"your_command\" N [interval]"
+if [ $# -ge 2 ]; then
+    if [[ "$2" == -* ]]; then
+        MODE=head
+        LINES="${2#-}"
+    else
+        MODE=tail
+        LINES="$2"
+    fi
+fi
+
+if [ $# -ge 3 ]; then
+    INTERVAL="$3"
+fi
+
+if [ -z "$CMD" ]; then
+    echo "Usage: $0 \"your_command\" [lines] [interval]"
+    echo "  lines    : N lines (default: 50 = last; -50 = first)"
+    echo "  interval : Refresh seconds (default: 1)"
     exit 1
 fi
 
-# Run the command with watch, piping output to tail
-watch -n "$INTERVAL" "$CMD | tail -n $LINES"
+if ! [[ "$LINES" =~ ^[0-9]+$ ]] || [ "$LINES" -eq 0 ]; then
+    echo "Error: lines must be a positive integer (got: ${2:-<empty>})" >&2
+    exit 1
+fi
+
+if ! [[ "$INTERVAL" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "Error: interval must be a positive number (got: $INTERVAL)" >&2
+    exit 1
+fi
+
+if [ "$MODE" = head ]; then
+    watch -n "$INTERVAL" "$CMD | head -n $LINES"
+else
+    watch -n "$INTERVAL" "$CMD | tail -n $LINES"
+fi
