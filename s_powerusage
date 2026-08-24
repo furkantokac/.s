@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Report what is drawing power on this laptop.
+#
+# Everything is read straight from sysfs. The script never calls nvidia-smi and
+# never runs "lspci -vv" against a runtime-suspended device, because both force
+# the device back to D0 -- that would wake the discrete GPU and destroy the very
+# idle state we are trying to measure.
+#
+# Usage:
+#   s_powerusage           # Full report, draw averaged over 10 seconds
+#   s_powerusage 30        # Full report, draw averaged over 30 seconds
+#   s_powerusage quick     # Full report, single instantaneous draw sample
+#   s_powerusage watch     # Live draw, updated every 2s (Ctrl-C to stop)
+
+BAT=""
+for b in /sys/class/power_supply/BAT*; do
+    [ -d "$b" ] && BAT="$b" && break
+done
+
+# Read a sysfs file, falling back to a placeholder when it does not exist.
+rd() { cat "$1" 2>/dev/null || echo "${2:-n/a}"; }
+
+usage() {
+    echo "Usage: s_powerusage [seconds|quick|watch]"
+    echo ""
+    echo "  (no args)   Full report, draw averaged over 10 seconds"
+    echo "  <seconds>   Full report, draw averaged over <seconds>"
+    echo "  quick       Full report, single instantaneous draw sample"
+    echo "  watch       Live draw, updated every 2s (Ctrl-C to stop)"
+    exit 1
+}
+
+# Instantaneous discharge in watts. This battery exposes no power_now, so it is
+# derived from current_now * voltage_now.
+draw_now() {
+    local p
+    p=$(rd "$BAT/power_now" "")
+    if [ -n "$p" ] && [ "$p" != "n/a" ] && [ "$p" -gt 0 ] 2>/dev/null; then
+        echo "scale=2; $p/1000000" | bc
+    else
+        echo "scale=2; $(rd "$BAT/current_now" 0)*$(rd "$BAT/voltage_now" 0)/1000000000000" | bc
+    fi
+}
+
+find_dgpu() {
+    local d v c
+    for d in /sys/bus/pci/devices/*/; do
+        v=$(rd "$d/vendor" ""); c=$(rd "$d/class" "")
+        case "$v:$c" in 0x10de:0x030*) basename "$d"; return 0 ;; esac
+    done
+    return 1
+}
+
+section_battery() {
+    local samples="$1" i draw med low high full design health charge status
+
+    status=$(rd "$BAT/status")
+    echo "=== BATTERY ==="
+    if [ "$status" != "Discharging" ]; then
+        echo "  Status: $status -- draw figures below are not idle drain."
+    fi
+
+    if [ "$samples" -le 1 ]; then
+        med=$(draw_now); low="$med"; high="$med"
+    else
+        local tmp stats; tmp=$(mktemp)
+        for ((i = 0; i < samples; i++)); do
+            draw_now >> "$tmp"
+            [ "$i" -lt "$((samples - 1))" ] && sleep 1
+        done
+        stats=$(sort -n "$tmp" | awk '{a[NR]=$1} END{print a[int(NR/2)+1], a[1], a[NR]}')
+        read -r med low high <<< "$stats"
+        rm -f "$tmp"
+    fi
+
+    full=$(echo "scale=1; $(rd "$BAT/charge_full" 0)*$(rd "$BAT/voltage_min_design" 0)/1000000000000" | bc)
+    design=$(echo "scale=1; $(rd "$BAT/charge_full_design" 0)*$(rd "$BAT/voltage_min_design" 0)/1000000000000" | bc)
+    charge=$(echo "scale=1; $(rd "$BAT/charge_now" 0)*$(rd "$BAT/voltage_min_design" 0)/1000000000000" | bc)
+    health=$(echo "scale=0; $(rd "$BAT/charge_full" 1)*100/$(rd "$BAT/charge_full_design" 1)" | bc)
+
+    printf "  Draw          : %s W" "$med"
+    [ "$samples" -gt 1 ] && printf "  (median of %s, range %s-%s)" "$samples" "$low" "$high"
+    printf "\n"
+    printf "  Charge        : %s%% (%s Wh of %s Wh)\n" "$(rd "$BAT/capacity")" "$charge" "$full"
+    printf "  Health        : %s%% (%s Wh usable, %s Wh from factory)\n" "$health" "$full" "$design"
+
+    if [ "$(echo "$med > 0" | bc)" = "1" ]; then
+        printf "  Runtime left  : %.1f h at this draw\n" "$(echo "scale=2; $charge/$med" | bc)"
+        printf "  Runtime full  : %.1f h at this draw\n" "$(echo "scale=2; $full/$med" | bc)"
+    fi
+}
+
+section_dgpu() {
+    echo ""
+    echo "=== DISCRETE GPU ==="
+    local dev d state ctrl susp up
+    if ! dev=$(find_dgpu); then
+        echo "  No NVIDIA GPU found."
+        return
+    fi
+    d="/sys/bus/pci/devices/$dev"
+    ctrl=$(rd "$d/power/control")
+    state=$(rd "$d/power/runtime_status")
+    susp=$(( $(rd "$d/power/runtime_suspended_time" 0) / 1000 ))
+    up=$(awk '{print int($1)}' /proc/uptime)
+
+    printf "  Device        : %s\n" "$dev"
+    printf "  Runtime PM    : %s%s\n" "$ctrl" \
+        "$([ "$ctrl" = "auto" ] && echo "  (good -- D3 allowed)" || echo "  (BAD -- stuck powered on, run s_nvidia_power_set_auto)")"
+    printf "  State         : %s / %s\n" "$state" "$(rd "$d/power_state")"
+    printf "  Asleep        : %s s of %s s uptime (%s%%)\n" "$susp" "$up" "$(( up > 0 ? susp * 100 / up : 0 ))"
+    echo "  (nvidia-smi deliberately not called -- it would wake the GPU)"
+}
+
+section_cpu() {
+    echo ""
+    echo "=== CPU ==="
+    printf "  Power profile : %s\n" "$(powerprofilesctl get 2>/dev/null || echo n/a)"
+    printf "  Governor / EPP: %s / %s\n" \
+        "$(rd /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)" \
+        "$(rd /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference)"
+
+    local total=0 t
+    for s in /sys/devices/system/cpu/cpu0/cpuidle/state*; do
+        t=$(rd "$s/time" 0); total=$((total + t))
+    done
+    echo "  Idle residency (cpu0, deeper is better):"
+    for s in /sys/devices/system/cpu/cpu0/cpuidle/state*; do
+        t=$(rd "$s/time" 0)
+        printf "    %-8s %3s%%\n" "$(rd "$s/name")" "$(( total > 0 ? t * 100 / total : 0 ))"
+    done
+}
+
+section_devices() {
+    echo ""
+    echo "=== DEVICE POWER SAVING ==="
+    printf "  Audio codec   : %s s idle timeout\n" "$(rd /sys/module/snd_hda_intel/parameters/power_save)"
+    printf "  NVMe APST     : %s us max latency\n" "$(rd /sys/module/nvme_core/parameters/default_ps_max_latency_us)"
+
+    local ps
+    ps=$(grep -rhs 'wifi.powersave' /etc/NetworkManager/ | awk 'NR==1{sub(/.*= */, ""); print}')
+    case "$ps" in
+        3) ps="3 (enabled)" ;;
+        2) ps="2 (DISABLED -- wastes power)" ;;
+        "") ps="unset (NetworkManager default)" ;;
+    esac
+    printf "  Wi-Fi powersave: %s\n" "$ps"
+
+    for bl in /sys/class/backlight/*/; do
+        printf "  Backlight     : %s%% (%s)\n" \
+            "$(echo "scale=0; $(rd "$bl/brightness" 0)*100/$(rd "$bl/max_brightness" 1)" | bc)" \
+            "$(basename "$bl")"
+    done
+
+    local on=0 auto=0 c
+    for u in /sys/bus/usb/devices/*/power/control; do
+        c=$(rd "$u" ""); [ "$c" = "auto" ] && auto=$((auto + 1)); [ "$c" = "on" ] && on=$((on + 1))
+    done
+    printf "  USB autosuspend: %s enabled, %s always-on\n" "$auto" "$on"
+}
+
+section_aspm() {
+    echo ""
+    echo "=== PCIe ASPM ==="
+    printf "  Policy        : %s\n" \
+        "$(rd /sys/module/pcie_aspm/parameters/policy)"
+
+    # link/l1_aspm is readable without root, unlike "lspci -vv", which would
+    # also resume every suspended device it touches.
+    local f d drv
+    for f in /sys/bus/pci/devices/*/link/l1_aspm; do
+        [ -e "$f" ] || continue
+        d=$(dirname "$(dirname "$f")")
+        [ -e "$d/driver" ] || continue
+        drv=$(basename "$(readlink "$d/driver")")
+        printf "    %-13s L1 %-8s %s\n" "$(basename "$d")" \
+            "$([ "$(rd "$f" 0)" = "1" ] && echo enabled || echo disabled)" "$drv"
+    done
+}
+
+section_rtpm() {
+    echo ""
+    echo "=== RUNTIME PM DISABLED (PCI) ==="
+    echo "  These stay powered on. Normal for controllers that do their own"
+    echo "  power management (NVMe/APST, Wi-Fi, iGPU). Only worth acting on if"
+    echo "  the discrete GPU shows up here."
+    local d dev class drv
+    for d in /sys/bus/pci/devices/*/; do
+        [ "$(rd "$d/power/control" "")" = "on" ] || continue
+        class=$(rd "$d/class" "")
+        case "$class" in 0x06*) continue ;; esac  # bridges never support RTPM
+        dev=$(basename "$d")
+        drv=$(basename "$(readlink "$d/driver" 2>/dev/null || echo -)")
+        printf "    %-13s %-12s %s\n" "$dev" "$drv" \
+            "$(lspci -s "${dev#0000:}" 2>/dev/null | cut -d' ' -f2- | cut -c1-52)"
+    done
+}
+
+section_procs() {
+    echo ""
+    echo "=== TOP CPU CONSUMERS (proxy for power) ==="
+    # The first top iteration reports averages since boot, so only the second
+    # one reflects what is actually burning CPU right now.
+    top -bn2 -d1 -o %CPU 2>/dev/null | awk '/^ *PID/{p++} p == 2 && c++ < 8' | sed 's/^/  /'
+}
+
+full_report() {
+    local samples="$1"
+    [ -n "$BAT" ] || { echo "No battery found under /sys/class/power_supply."; exit 1; }
+    section_battery "$samples"
+    section_dgpu
+    section_cpu
+    section_devices
+    section_aspm
+    section_rtpm
+    section_procs
+    echo ""
+    echo "Tip: s_nvidia_power_set_auto show  -- manage the discrete GPU power state"
+}
+
+watch_draw() {
+    [ -n "$BAT" ] || { echo "No battery found."; exit 1; }
+    echo "Live draw (Ctrl-C to stop)"
+    while true; do
+        printf "\r  %s W   dGPU=%-10s" "$(draw_now)" \
+            "$(rd "/sys/bus/pci/devices/$(find_dgpu)/power/runtime_status" "n/a")"
+        sleep 2
+    done
+}
+
+# --- Main ---
+
+case "${1:-10}" in
+    quick)     full_report 1 ;;
+    watch)     watch_draw ;;
+    -h|--help) usage ;;
+    *[!0-9]*)  usage ;;
+    *)         full_report "${1:-10}" ;;
+esac

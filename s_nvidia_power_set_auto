@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Let the NVIDIA discrete GPU power itself down when idle (PCIe Runtime D3).
+#
+# The kernel default for power/control is "on", which pins the dGPU in D0
+# forever -- measured at ~6-7 W of constant drain on this laptop even with
+# nothing using it. Setting it to "auto" lets the driver drop the card to
+# D3cold, which is what "s_powerusage" should report when the machine is idle.
+#
+# NVIDIA ships /lib/udev/rules.d/71-nvidia.rules to do this, but that rule only
+# matches ACTION=="bind". The nvidia modules live in the initramfs and bind at
+# ~2.3 s, before udevd from the real root filesystem exists, so the rule never
+# fires. "autostart" installs a rule that also matches ACTION=="add", which
+# systemd-udev-trigger.service replays for every device at boot.
+#
+# Usage:
+#   s_nvidia_power_set_auto            # Set to auto right now (until reboot)
+#   s_nvidia_power_set_auto autostart  # Install udev rule so it survives reboots
+#   s_nvidia_power_set_auto show       # Show current power state
+#   s_nvidia_power_set_auto remove     # Remove the udev rule
+
+RULE_PATH="/etc/udev/rules.d/80-nvidia-pm.rules"
+VENDOR_RULE="/lib/udev/rules.d/71-nvidia.rules"
+
+usage() {
+    echo "Usage: s_nvidia_power_set_auto [autostart|show|remove]"
+    echo ""
+    echo "  (no args)   Set power/control to auto right now (lost on reboot)"
+    echo "  autostart   Install a udev rule so it is applied on every boot"
+    echo "  show        Show current power state and whether the rule is installed"
+    echo "  remove      Remove the udev rule"
+    exit 1
+}
+
+# Echo the PCI address of every NVIDIA display-class device.
+find_dgpus() {
+    local d v c
+    for d in /sys/bus/pci/devices/*/; do
+        v=$(cat "$d/vendor" 2>/dev/null || echo "")
+        c=$(cat "$d/class" 2>/dev/null || echo "")
+        case "$v:$c" in 0x10de:0x030*) basename "$d" ;; esac
+    done
+}
+
+require_gpu() {
+    if [ -z "$(find_dgpus)" ]; then
+        echo "Error: no NVIDIA display device found under /sys/bus/pci/devices."
+        exit 1
+    fi
+}
+
+set_auto() {
+    require_gpu
+    local dev
+    for dev in $(find_dgpus); do
+        echo "auto" | sudo tee "/sys/bus/pci/devices/$dev/power/control" > /dev/null
+        echo "$dev -> $(cat "/sys/bus/pci/devices/$dev/power/control")"
+    done
+    echo "Applied. The GPU drops to D3cold a few seconds after it goes idle."
+}
+
+install_rule() {
+    require_gpu
+    sudo tee "$RULE_PATH" > /dev/null <<'EOF'
+# Enable PCI runtime power management for the NVIDIA discrete GPU.
+#
+# The vendor rule in /lib/udev/rules.d/71-nvidia.rules only listens for
+# ACTION=="bind". The nvidia modules ship inside the initramfs and bind at
+# ~2.3 s, before udevd from the real root filesystem is running, so that rule
+# never fires. power/control is then left at the kernel default "on", Runtime
+# D3 can never engage, and the dGPU idles at ~6 W for the whole uptime.
+#
+# systemd-udev-trigger.service replays ACTION=="add" for every device at boot
+# (udevadm trigger --type=all --action=add), so matching "add" as well makes
+# the setting stick.
+#
+# Managed by s_nvidia_power_set_auto.
+ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x03[0-9]*", TEST=="power/control", ATTR{power/control}="auto"
+EOF
+    sudo udevadm control --reload-rules
+    echo "Installed $RULE_PATH -- applied on every boot from now on."
+    set_auto
+}
+
+remove_rule() {
+    if [ ! -f "$RULE_PATH" ]; then
+        echo "Rule not installed, nothing to remove."
+        exit 0
+    fi
+    sudo rm -f "$RULE_PATH"
+    sudo udevadm control --reload-rules
+    echo "Removed $RULE_PATH"
+    echo "The current session keeps its setting; the kernel default 'on' returns after reboot."
+}
+
+show_status() {
+    require_gpu
+    local dev d ctrl susp up
+
+    up=$(awk '{print int($1)}' /proc/uptime)
+    for dev in $(find_dgpus); do
+        d="/sys/bus/pci/devices/$dev"
+        ctrl=$(cat "$d/power/control" 2>/dev/null || echo n/a)
+        susp=$(( $(cat "$d/power/runtime_suspended_time" 2>/dev/null || echo 0) / 1000 ))
+
+        echo "=== $dev ==="
+        printf "  Runtime PM  : %s%s\n" "$ctrl" \
+            "$([ "$ctrl" = "auto" ] && echo "  (good)" || echo "  (pinned on -- wasting ~6 W)")"
+        printf "  State       : %s / %s\n" \
+            "$(cat "$d/power/runtime_status" 2>/dev/null || echo n/a)" \
+            "$(cat "$d/power_state" 2>/dev/null || echo n/a)"
+        printf "  D3cold      : %s\n" \
+            "$([ "$(cat "$d/d3cold_allowed" 2>/dev/null || echo 0)" = "1" ] && echo allowed || echo "not allowed")"
+        printf "  Asleep      : %s s of %s s uptime (%s%%)\n" \
+            "$susp" "$up" "$(( up > 0 ? susp * 100 / up : 0 ))"
+    done
+
+    echo ""
+    echo "=== PERSISTENCE ==="
+    if [ -f "$RULE_PATH" ]; then
+        echo "  udev rule   : installed ($RULE_PATH)"
+    else
+        echo "  udev rule   : NOT installed -- run 's_nvidia_power_set_auto autostart'"
+    fi
+
+    if [ -f "$VENDOR_RULE" ]; then
+        if grep -q 'ACTION=="add|bind"' "$VENDOR_RULE" 2>/dev/null; then
+            echo "  vendor rule : fixed upstream -- our rule is now redundant"
+        else
+            echo "  vendor rule : still bind-only -- our rule is still required"
+        fi
+    fi
+
+    echo ""
+    echo "  (nvidia-smi deliberately not called -- it would wake the GPU)"
+}
+
+# --- Main ---
+
+case "${1:-set}" in
+    set)       set_auto
+               [ -f "$RULE_PATH" ] || echo "Not persistent -- run 's_nvidia_power_set_auto autostart' to survive reboots." ;;
+    autostart) install_rule ;;
+    show)      show_status ;;
+    remove)    remove_rule ;;
+    -h|--help) usage ;;
+    *)         usage ;;
+esac
