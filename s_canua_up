@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Hand a uaLink adapter to SocketCAN.
+# The browser cannot use it until s_canua_down.
+# Usage: s_canua_up [iface] [kbps]
+# Example: s_canua_up
+# Example: s_canua_up can0 500
+
+set -euo pipefail
+
+UALINK="$HOME/Git/uap/viber/scripts/ualink.sh"
+if [ ! -f "$UALINK" ]; then
+  echo "ualink.sh not found: $UALINK" >&2
+  exit 1
+fi
+
+exec "$UALINK" up "$@"
