@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Report what is drawing power on this laptop.
+# Report what is drawing power on this laptop, and how hard it is charging
+# when an adapter is connected.
 #
 # Everything is read straight from sysfs. The script never calls nvidia-smi and
 # never runs "lspci -vv" against a runtime-suspended device, because both force
 # the device back to D0 -- that would wake the discrete GPU and destroy the very
 # idle state we are trying to measure.
 #
+# Battery watts are measured (current_now * voltage_now). USB-C watts are the
+# negotiated PD contract -- the ceiling the adapter agreed to -- not a measured
+# flow. A weak charger shows up as a low ceiling.
+#
 # Usage:
 #   s_powerusage           # Full report, draw averaged over 10 seconds
 #   s_powerusage 30        # Full report, draw averaged over 30 seconds
 #   s_powerusage quick     # Full report, single instantaneous draw sample
-#   s_powerusage watch     # Live draw, updated every 2s (Ctrl-C to stop)
+#   s_powerusage watch     # Live power, updated every 2s (Ctrl-C to stop)
 
 BAT=""
 for b in /sys/class/power_supply/BAT*; do
@@ -28,19 +33,217 @@ usage() {
     echo "  (no args)   Full report, draw averaged over 10 seconds"
     echo "  <seconds>   Full report, draw averaged over <seconds>"
     echo "  quick       Full report, single instantaneous draw sample"
-    echo "  watch       Live draw, updated every 2s (Ctrl-C to stop)"
+    echo "  watch       Live power, updated every 2s (Ctrl-C to stop)"
     exit 1
 }
 
-# Instantaneous discharge in watts. This battery exposes no power_now, so it is
-# derived from current_now * voltage_now.
+# Integer sysfs value, or the default when the file is missing or not a number.
+num() {
+    local v
+    v=$(rd "$1" "${2:-0}")
+    v=${v//[[:space:]]/}
+    [[ "$v" =~ ^-?[0-9]+$ ]] || v="${2:-0}"
+    echo "$v"
+}
+
+# bc drops the leading zero on fractions (".57"), which reads like a typo.
+lead0() {
+    case "$1" in
+        .*) echo "0$1" ;;
+        -.*) echo "-0${1#-}" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+# sysfs micro-units (uV, uA) to a decimal. bc truncates toward zero.
+uscale() { lead0 "$(echo "scale=$2; ${1#-}/1000000" | bc)"; }
+
+# Instantaneous battery power in watts, magnitude only. This battery exposes no
+# power_now, so it is derived from current_now * voltage_now. Status says
+# whether that power is leaving the pack or entering it.
 draw_now() {
-    local p
+    local p ua uv
     p=$(rd "$BAT/power_now" "")
-    if [ -n "$p" ] && [ "$p" != "n/a" ] && [ "$p" -gt 0 ] 2>/dev/null; then
-        echo "scale=2; $p/1000000" | bc
+    p=${p//[[:space:]]/}
+    if [[ "$p" =~ ^-?[0-9]+$ ]] && [ "${p#-}" -gt 0 ]; then
+        lead0 "$(echo "scale=2; ${p#-}/1000000" | bc)"
+        return
+    fi
+    ua=$(num "$BAT/current_now" 0); uv=$(num "$BAT/voltage_now" 0)
+    lead0 "$(echo "scale=2; ${ua#-} * ${uv#-} / 1000000000000" | bc)"
+}
+
+# Selected USB mode is the bracketed token: "C [PD] PD_PPS" -> PD.
+usb_mode() {
+    local t
+    t=$(rd "$1/usb_type" "")
+    t=${t//[[:space:]]/ }
+    if [[ "$t" =~ \[([^]]+)\] ]]; then
+        echo "${BASH_REMATCH[1]}"
+    elif [ -n "${t// /}" ]; then
+        echo "$t"
     else
-        echo "scale=2; $(rd "$BAT/current_now" 0)*$(rd "$BAT/voltage_now" 0)/1000000000000" | bc
+        echo "USB"
+    fi
+}
+
+charger_kind() {
+    case "$1" in
+        PD|PD_PPS) echo "USB-C $1" ;;
+        C) echo "USB-C" ;;
+        *) echo "USB ($1)" ;;
+    esac
+}
+
+# Plain label for a negotiated watt ceiling, so a phone charger is obvious.
+charger_strength() {
+    local w="$1"
+    if [ "$(echo "$w < 15" | bc)" = 1 ]; then echo "very weak"
+    elif [ "$(echo "$w < 30" | bc)" = 1 ]; then echo "weak"
+    elif [ "$(echo "$w < 45" | bc)" = 1 ]; then echo "light"
+    elif [ "$(echo "$w < 65" | bc)" = 1 ]; then echo "moderate"
+    elif [ "$(echo "$w < 100" | bc)" = 1 ]; then echo "strong"
+    else echo "very strong"
+    fi
+}
+
+mains_online() {
+    local d
+    for d in /sys/class/power_supply/*/; do
+        [ "$(rd "$d/type" "")" = "Mains" ] || continue
+        [ "$(num "$d/online" 0)" = "1" ] && return 0
+    done
+    return 1
+}
+
+plugged_in() {
+    local d
+    mains_online && return 0
+    for d in /sys/class/power_supply/*/; do
+        [ "$(rd "$d/type" "")" = "USB" ] || continue
+        [ "$(num "$d/online" 0)" = "1" ] && return 0
+    done
+    return 1
+}
+
+# Hours until charge_now reaches pct% of charge_full, at the current amps.
+# Empty output when the pack is not taking current.
+eta_hours() {
+    local pct="$1" ua now full target
+    ua=$(num "$BAT/current_now" 0); ua=${ua#-}
+    now=$(num "$BAT/charge_now" 0)
+    full=$(num "$BAT/charge_full" 0)
+    [ "$ua" -gt 0 ] && [ "$full" -gt 0 ] || return 0
+    target=$(( full * pct / 100 ))
+    if [ "$now" -ge "$target" ]; then
+        echo "0"
+        return
+    fi
+    echo "scale=2; ($target - $now) / $ua" | bc
+}
+
+fmt_eta() {
+    local h="$1"
+    [ -n "$h" ] || { echo "n/a"; return; }
+    if [ "$(echo "$h <= 0" | bc)" = 1 ]; then
+        echo "reached"
+    elif [ "$(echo "$h < 1" | bc)" = 1 ]; then
+        echo "$(echo "scale=0; ($h * 60 + 0.5)/1" | bc) min"
+    else
+        printf "%.1f h" "$h"
+    fi
+}
+
+eta_line() {
+    local label="$1" h="$2" text
+    [ -n "$h" ] || return 0
+    text=$(fmt_eta "$h")
+    if [ "$text" = "reached" ]; then
+        printf "  %-14s: reached\n" "$label"
+    else
+        printf "  %-14s: %s at this rate\n" "$label" "$text"
+    fi
+}
+
+print_watt_line() {
+    local label="$1" med="$2" samples="$3" low="$4" high="$5"
+    printf "  %-14s: %s W" "$label" "$med"
+    [ "$samples" -gt 1 ] && printf "  (median of %s, range %s-%s)" "$samples" "$low" "$high"
+    printf "\n"
+}
+
+# Negotiated USB-C contract for every online port. Sets CONTRACT_W to the
+# highest ceiling seen (empty when no port reports voltage and current).
+print_chargers() {
+    local d mode ua uv cw vw aw name vmin vmax kind found=0
+    CONTRACT_W=""
+    for d in /sys/class/power_supply/*/; do
+        [ "$(rd "$d/type" "")" = "USB" ] || continue
+        [ "$(num "$d/online" 0)" = "1" ] || continue
+        found=1
+        name=$(basename "$d")
+        name=${name#ucsi-source-psy-}
+        mode=$(usb_mode "$d")
+        kind=$(charger_kind "$mode")
+        ua=$(num "$d/current_max" 0)
+        [ "$ua" -eq 0 ] && ua=$(num "$d/current_now" 0)
+        uv=$(num "$d/voltage_now" 0)
+        [ "$uv" -eq 0 ] && uv=$(num "$d/voltage_max" 0)
+        ua=${ua#-}; uv=${uv#-}
+        printf "  %-14s: %s on %s\n" "Charger" "$kind" "$name"
+        if [ "$ua" -gt 0 ] && [ "$uv" -gt 0 ]; then
+            vw=$(uscale "$uv" 1)
+            aw=$(uscale "$ua" 2)
+            cw=$(lead0 "$(echo "scale=1; $ua * $uv / 1000000000000" | bc)")
+            printf "  %-14s: %s V x %s A = %s W max (%s)\n" \
+                "Negotiated" "$vw" "$aw" "$cw" "$(charger_strength "$cw")"
+            if [ -z "$CONTRACT_W" ] || [ "$(echo "$cw > $CONTRACT_W" | bc)" = 1 ]; then
+                CONTRACT_W="$cw"
+            fi
+        else
+            echo "  Negotiated    : n/a"
+        fi
+        vmin=$(num "$d/voltage_min" 0)
+        vmax=$(num "$d/voltage_max" 0)
+        if [ "$vmax" -gt 0 ] && [ "$vmax" -ne "$vmin" ]; then
+            printf "  %-14s: %s-%s V\n" "Source range" \
+                "$(uscale "$vmin" 1)" "$(uscale "$vmax" 1)"
+        fi
+    done
+    if [ "$found" = 0 ]; then
+        if mains_online; then
+            echo "  Charger       : mains adapter online (no voltage or current reported)"
+        else
+            echo "  Charger       : unplugged"
+        fi
+    fi
+}
+
+charger_brief() {
+    local d mode ua uv
+    for d in /sys/class/power_supply/*/; do
+        [ "$(rd "$d/type" "")" = "USB" ] || continue
+        [ "$(num "$d/online" 0)" = "1" ] || continue
+        mode=$(usb_mode "$d")
+        ua=$(num "$d/current_max" 0)
+        [ "$ua" -eq 0 ] && ua=$(num "$d/current_now" 0)
+        uv=$(num "$d/voltage_now" 0)
+        [ "$uv" -eq 0 ] && uv=$(num "$d/voltage_max" 0)
+        ua=${ua#-}; uv=${uv#-}
+        if [ "$ua" -gt 0 ] && [ "$uv" -gt 0 ]; then
+            printf "%s %sV x %sA = %sW" \
+                "$(charger_kind "$mode")" \
+                "$(uscale "$uv" 1)" "$(uscale "$ua" 2)" \
+                "$(echo "scale=0; $ua * $uv / 1000000000000" | bc)"
+        else
+            printf "%s" "$(charger_kind "$mode")"
+        fi
+        return 0
+    done
+    if mains_online; then
+        echo "mains adapter"
+    else
+        echo "unplugged"
     fi
 }
 
@@ -54,12 +257,14 @@ find_dgpu() {
 }
 
 section_battery() {
-    local samples="$1" i draw med low high full design health charge status
+    local samples="$1" i med low high full design health charge status
+    local limit cap ua uv c_rate pct_h on_battery
 
     status=$(rd "$BAT/status")
-    echo "=== BATTERY ==="
-    if [ "$status" != "Discharging" ]; then
-        echo "  Status: $status -- draw figures below are not idle drain."
+    status=${status//[[:space:]]/}
+    on_battery=0
+    if [ "$status" = "Discharging" ] && ! plugged_in; then
+        on_battery=1
     fi
 
     if [ "$samples" -le 1 ]; then
@@ -75,20 +280,95 @@ section_battery() {
         rm -f "$tmp"
     fi
 
-    full=$(echo "scale=1; $(rd "$BAT/charge_full" 0)*$(rd "$BAT/voltage_min_design" 0)/1000000000000" | bc)
-    design=$(echo "scale=1; $(rd "$BAT/charge_full_design" 0)*$(rd "$BAT/voltage_min_design" 0)/1000000000000" | bc)
-    charge=$(echo "scale=1; $(rd "$BAT/charge_now" 0)*$(rd "$BAT/voltage_min_design" 0)/1000000000000" | bc)
-    health=$(echo "scale=0; $(rd "$BAT/charge_full" 1)*100/$(rd "$BAT/charge_full_design" 1)" | bc)
+    full=$(echo "scale=1; $(num "$BAT/charge_full" 0)*$(num "$BAT/voltage_min_design" 0)/1000000000000" | bc)
+    design=$(echo "scale=1; $(num "$BAT/charge_full_design" 0)*$(num "$BAT/voltage_min_design" 0)/1000000000000" | bc)
+    charge=$(echo "scale=1; $(num "$BAT/charge_now" 0)*$(num "$BAT/voltage_min_design" 0)/1000000000000" | bc)
+    health=$(echo "scale=0; $(num "$BAT/charge_full" 1)*100/$(num "$BAT/charge_full_design" 1)" | bc)
+    limit=$(rd "$BAT/charge_control_end_threshold" "")
+    limit=${limit//[[:space:]]/}
+    cap=$(num "$BAT/capacity" 0)
 
-    printf "  Draw          : %s W" "$med"
-    [ "$samples" -gt 1 ] && printf "  (median of %s, range %s-%s)" "$samples" "$low" "$high"
-    printf "\n"
-    printf "  Charge        : %s%% (%s Wh of %s Wh)\n" "$(rd "$BAT/capacity")" "$charge" "$full"
-    printf "  Health        : %s%% (%s Wh usable, %s Wh from factory)\n" "$health" "$full" "$design"
+    echo "=== BATTERY ==="
+    printf "  %-14s: %s\n" "Status" "$status"
+    printf "  %-14s: %s%% (%s Wh of %s Wh)\n" "Level" "$cap" "$charge" "$full"
+    printf "  %-14s: %s%% (%s Wh usable, %s Wh from factory)\n" "Health" "$health" "$full" "$design"
+    if [[ "$limit" =~ ^[0-9]+$ ]]; then
+        printf "  %-14s: %s%%\n" "Limit" "$limit"
+    fi
 
-    if [ "$(echo "$med > 0" | bc)" = "1" ]; then
-        printf "  Runtime left  : %.1f h at this draw\n" "$(echo "scale=2; $charge/$med" | bc)"
-        printf "  Runtime full  : %.1f h at this draw\n" "$(echo "scale=2; $full/$med" | bc)"
+    # On battery the familiar drain figures stay here. Plugged in, the same
+    # watts are the charge (or the drain the adapter failed to cover) and are
+    # printed with the charger contract below.
+    if [ "$on_battery" = 1 ]; then
+        print_watt_line "Draw" "$med" "$samples" "$low" "$high"
+        if [ "$(echo "$med > 0" | bc)" = "1" ]; then
+            printf "  %-14s: %.1f h at this draw\n" "Runtime left" "$(echo "scale=2; $charge/$med" | bc)"
+            printf "  %-14s: %.1f h at this draw\n" "Runtime full" "$(echo "scale=2; $full/$med" | bc)"
+        fi
+    fi
+
+    echo ""
+    echo "=== CHARGING ==="
+    case "$status" in
+        Full)
+            echo "  Note          : battery is full" ;;
+        "Not charging")
+            if [[ "$limit" =~ ^[0-9]+$ ]] && [ "$cap" -ge "$((limit - 1))" ]; then
+                echo "  Note          : holding at the ${limit}% charge limit"
+            else
+                echo "  Note          : plugged in, not charging"
+            fi ;;
+        Discharging)
+            [ "$on_battery" = 1 ] || echo "  Note          : plugged in, but the battery is still discharging" ;;
+    esac
+
+    if [ "$on_battery" = 0 ]; then
+        if [ "$status" = "Charging" ]; then
+            print_watt_line "Charge rate" "$med" "$samples" "$low" "$high"
+        else
+            print_watt_line "Draw" "$med" "$samples" "$low" "$high"
+        fi
+    fi
+
+    # V x A is the live reading. The %/h figure is only a charge speed;
+    # while discharging it would describe drain and does not belong here.
+    if [ "$status" = "Charging" ]; then
+        ua=$(num "$BAT/current_now" 0); ua=${ua#-}
+        uv=$(num "$BAT/voltage_now" 0); uv=${uv#-}
+        if [ "$ua" -gt 0 ]; then
+            if [ "$(num "$BAT/charge_full" 0)" -gt 0 ]; then
+                c_rate=$(lead0 "$(echo "scale=2; $ua / $(num "$BAT/charge_full" 0)" | bc)")
+                pct_h=$(echo "scale=0; $ua * 100 / $(num "$BAT/charge_full" 0)" | bc)
+                printf "  %-14s: %s V x %s A -- %s C, about %s%%/h\n" "Into pack" \
+                    "$(uscale "$uv" 2)" "$(uscale "$ua" 2)" "$c_rate" "$pct_h"
+            else
+                printf "  %-14s: %s V x %s A\n" "Into pack" \
+                    "$(uscale "$uv" 2)" "$(uscale "$ua" 2)"
+            fi
+        fi
+    fi
+
+    print_chargers
+
+    if [ "$status" = "Charging" ] && [ -n "$CONTRACT_W" ]; then
+        if [ "$(echo "$CONTRACT_W < 30" | bc)" = 1 ]; then
+            printf "  %-14s: weak charger, %s W ceiling\n" "Pace" "$CONTRACT_W"
+        elif [ "$(echo "$med > 0 && $med * 2 < $CONTRACT_W" | bc)" = 1 ]; then
+            printf "  %-14s: %s W into the battery, under half of the %s W ceiling\n" \
+                "Pace" "$med" "$CONTRACT_W"
+        fi
+    elif [ "$status" = "Discharging" ] && [ "$on_battery" = 0 ] && [ -n "$CONTRACT_W" ]; then
+        printf "  %-14s: adapter ceiling is %s W and the battery is still draining at %s W\n" \
+            "Pace" "$CONTRACT_W" "$med"
+    fi
+
+    if [ "$status" = "Charging" ]; then
+        if [[ "$limit" =~ ^[0-9]+$ ]] && [ "$limit" -lt 100 ]; then
+            eta_line "To ${limit}% limit" "$(eta_hours "$limit")"
+        fi
+        eta_line "To 100%" "$(eta_hours 100)"
+    elif [ "$status" = "Discharging" ] && [ "$on_battery" = 0 ] && [ "$(echo "$med > 0" | bc)" = "1" ]; then
+        printf "  %-14s: %.1f h at this draw\n" "Runtime left" "$(echo "scale=2; $charge/$med" | bc)"
     fi
 }
 
@@ -222,10 +502,27 @@ full_report() {
 
 watch_draw() {
     [ -n "$BAT" ] || { echo "No battery found."; exit 1; }
-    echo "Live draw (Ctrl-C to stop)"
+    echo "Live power (Ctrl-C to stop)"
+    local w status cap brief gpu dev
     while true; do
-        printf "\r  %s W   dGPU=%-10s" "$(draw_now)" \
-            "$(rd "/sys/bus/pci/devices/$(find_dgpu)/power/runtime_status" "n/a")"
+        w=$(draw_now)
+        status=$(rd "$BAT/status")
+        status=${status//[[:space:]]/}
+        cap=$(num "$BAT/capacity" 0)
+        brief=$(charger_brief)
+        dev=$(find_dgpu 2>/dev/null || true)
+        gpu=$(rd "/sys/bus/pci/devices/${dev}/power/runtime_status" "n/a")
+        case "$status" in
+            Charging)
+                printf "\r  +%s W into battery   %s%%   %s   dGPU=%-10s\033[K" \
+                    "$w" "$cap" "$brief" "$gpu" ;;
+            Discharging)
+                printf "\r  -%s W draw   %s%%   %s   dGPU=%-10s\033[K" \
+                    "$w" "$cap" "$brief" "$gpu" ;;
+            *)
+                printf "\r  %s W   %s (%s%%)   %s   dGPU=%-10s\033[K" \
+                    "$w" "$status" "$cap" "$brief" "$gpu" ;;
+        esac
         sleep 2
     done
 }
