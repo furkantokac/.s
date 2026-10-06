@@ -17,7 +17,7 @@ set -euo pipefail
 #   s_powerusage           # Full report, draw averaged over 10 seconds
 #   s_powerusage 30        # Full report, draw averaged over 30 seconds
 #   s_powerusage quick     # Full report, single instantaneous draw sample
-#   s_powerusage watch     # Live power, updated every 2s (Ctrl-C to stop)
+#   s_powerusage watch     # Live power, updated every 1s (Ctrl-C to stop)
 
 BAT=""
 for b in /sys/class/power_supply/BAT*; do
@@ -33,7 +33,7 @@ usage() {
     echo "  (no args)   Full report, draw averaged over 10 seconds"
     echo "  <seconds>   Full report, draw averaged over <seconds>"
     echo "  quick       Full report, single instantaneous draw sample"
-    echo "  watch       Live power, updated every 2s (Ctrl-C to stop)"
+    echo "  watch       Live power, updated every 1s (Ctrl-C to stop)"
     exit 1
 }
 
@@ -523,7 +523,7 @@ watch_draw() {
                 printf "\r  %s W   %s (%s%%)   %s   dGPU=%-10s\033[K" \
                     "$w" "$status" "$cap" "$brief" "$gpu" ;;
         esac
-        sleep 2
+        sleep 1
     done
 }
 
