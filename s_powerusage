@@ -14,10 +14,12 @@ set -euo pipefail
 # flow. A weak charger shows up as a low ceiling.
 #
 # Usage:
-#   s_powerusage           # Full report, draw averaged over 10 seconds
+#   s_powerusage           # Live power, updated every 1s (Ctrl-C to stop)
+#   s_powerusage watch     # Same as no args
+#   s_powerusage all       # Full report, draw averaged over 10 seconds
 #   s_powerusage 30        # Full report, draw averaged over 30 seconds
 #   s_powerusage quick     # Full report, single instantaneous draw sample
-#   s_powerusage watch     # Live power, updated every 1s (Ctrl-C to stop)
+#   s_powerusage h         # Help
 
 BAT=""
 for b in /sys/class/power_supply/BAT*; do
@@ -28,12 +30,14 @@ done
 rd() { cat "$1" 2>/dev/null || echo "${2:-n/a}"; }
 
 usage() {
-    echo "Usage: s_powerusage [seconds|quick|watch]"
+    echo "Usage: s_powerusage [watch|all|seconds|quick|h]"
     echo ""
-    echo "  (no args)   Full report, draw averaged over 10 seconds"
+    echo "  (no args)   Live power, updated every 1s (Ctrl-C to stop)"
+    echo "  watch       Same as no args"
+    echo "  all         Full report, draw averaged over 10 seconds"
     echo "  <seconds>   Full report, draw averaged over <seconds>"
     echo "  quick       Full report, single instantaneous draw sample"
-    echo "  watch       Live power, updated every 1s (Ctrl-C to stop)"
+    echo "  h           This help"
     exit 1
 }
 
@@ -529,10 +533,11 @@ watch_draw() {
 
 # --- Main ---
 
-case "${1:-10}" in
-    quick)     full_report 1 ;;
-    watch)     watch_draw ;;
-    -h|--help) usage ;;
-    *[!0-9]*)  usage ;;
-    *)         full_report "${1:-10}" ;;
+case "${1:-watch}" in
+    quick)       full_report 1 ;;
+    watch)       watch_draw ;;
+    all)         full_report 10 ;;
+    h|-h|--help) usage ;;
+    *[!0-9]*)    usage ;;
+    *)           full_report "$1" ;;
 esac
